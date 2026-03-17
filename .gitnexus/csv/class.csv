@@ -1,0 +1,5628 @@
+id,name,filePath,startLine,endLine,isExported,content,description
+"Class:backend/app/config.py:Config:19","Config","backend/app/config.py",19,77,true,"
+
+class Config:
+    """"""Flask配置类""""""
+    
+    # Flask配置
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
+    DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    
+    # JSON配置 - 禁用ASCII转义，让中文直接显示（而不是 \uXXXX 格式）
+    JSON_AS_ASCII = False
+    
+    # LLM配置（统一使用OpenAI格式）
+    LLM_API_KEY = os.environ.get('LLM_API_KEY')
+    LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
+    LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    
+    # Zep配置
+    ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+    
+    # 文件上传配置
+    MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
+    UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
+    ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
+    
+    # 文本处理配置
+    DEFAULT_CHUNK_SIZE = 500  # 默认切块大小
+    DEFAULT_CHUNK_OVERLAP = 50  # 默认重叠大小
+    
+    # OASIS模拟配置
+    OASIS_DEFAULT_MAX_ROUNDS = int(os.environ.get('OASIS_DEFAULT_MAX_ROUNDS', '10'))
+    OASIS_SIMULATION_DATA_DIR = os.path.join(os.path.dirname(__file__), '../uploads/simulations')
+    
+    # OASIS平台可用动作配置
+    OASIS_TWITTER_ACTIONS = [
+        'CREATE_POST', 'LIKE_POST', 'REPOST', 'FOLLOW', 'DO_NOTHING', 'QUOTE_POST'
+    ]
+    OASIS_REDDIT_ACTIONS = [
+        'LIKE_POST', 'DISLIKE_POST', 'CREATE_POST', 'CREATE_COMMENT',
+        'LIKE_COMMENT', 'DISLIKE_COMMENT', 'SEARCH_POSTS', 'SEARCH_USER',
+        'TREND', 'REFRESH', 'DO_NOTHING', 'FOLLOW', 'MUTE'
+    ]
+    
+    # 语言配置 (Language configuration)
+    # Supported: 'zh' (Chinese), 'vi' (Vietnamese)
+    LANGUAGE = os.environ.get('MIROFISH_LANGUAGE', 'zh')
+
+    # Report Agent配置
+    REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
+    REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
+    REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+    
+    @classmethod
+    def validate(cls):
+        """"""验证必要配置""""""
+        errors = []
+        if not cls.LLM_API_KEY:
+            errors.append(""LLM_API_KEY 未配置"")
+        if not cls.ZEP_API_KEY:
+            errors.append(""ZEP_API_KEY 未配置"")
+        return errors
+
+",""
+"Class:backend/scripts/run_twitter_simulation.py:UnicodeFormatter:52","UnicodeFormatter","backend/scripts/run_twitter_simulation.py",52,66,true,"
+
+class UnicodeFormatter(logging.Formatter):
+    """"""自定义格式化器，将 Unicode 转义序列转换为可读字符""""""
+    
+    UNICODE_ESCAPE_PATTERN = re.compile(r'\\u([0-9a-fA-F]{4})')
+    
+    def format(self, record):
+        result = super().format(record)
+        
+        def replace_unicode(match):
+            try:
+                return chr(int(match.group(1), 16))
+            except (ValueError, OverflowError):
+                return match.group(0)
+        
+        return self.UNICODE_ESCAPE_PATTERN.sub(replace_unicode, result)
+
+
+",""
+"Class:backend/scripts/run_twitter_simulation.py:MaxTokensWarningFilter:69","MaxTokensWarningFilter","backend/scripts/run_twitter_simulation.py",69,76,true,"
+
+class MaxTokensWarningFilter(logging.Filter):
+    """"""过滤掉 camel-ai 关于 max_tokens 的警告（我们故意不设置 max_tokens，让模型自行决定）""""""
+    
+    def filter(self, record):
+        # 过滤掉包含 max_tokens 警告的日志
+        if ""max_tokens"" in record.getMessage() and ""Invalid or missing"" in record.getMessage():
+            return False
+        return True
+
+
+",""
+"Class:backend/scripts/run_twitter_simulation.py:CommandType:138","CommandType","backend/scripts/run_twitter_simulation.py",138,142,true,"ENV_STATUS_FILE = ""env_status.json""
+
+class CommandType:
+    """"""命令类型常量""""""
+    INTERVIEW = ""interview""
+    BATCH_INTERVIEW = ""batch_interview""
+    CLOSE_ENV = ""close_env""
+
+
+",""
+"Class:backend/scripts/run_twitter_simulation.py:IPCHandler:145","IPCHandler","backend/scripts/run_twitter_simulation.py",145,381,true,"
+
+class IPCHandler:
+    """"""IPC命令处理器""""""
+    
+    def __init__(self, simulation_dir: str, env, agent_graph):
+        self.simulation_dir = simulation_dir
+        self.env = env
+        self.agent_graph = agent_graph
+        self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
+        self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
+        self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
+        self._running = True
+        
+        # 确保目录存在
+        os.makedirs(self.commands_dir, exist_ok=True)
+        os.makedirs(self.responses_dir, exist_ok=True)
+    
+    def update_status(self, status: str):
+        """"""更新环境状态""""""
+        with open(self.status_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                ""status"": status,
+                ""timestamp"": datetime.now().isoformat()
+            }, f, ensure_ascii=False, indent=2)
+    
+    def poll_command(self) -> Optional[Dict[str, Any]]:
+        """"""轮询获取待处理命令""""""
+        if not os.path.exists(self.commands_dir):
+            return None
+        
+        # 获取命令文件（按时间排序）
+        command_files = []
+        for filename in os.listdir(self.commands_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(self.commands_dir, filename)
+                command_files.append((filepath, os.path.getmtime(filepath)))
+        
+        command_files.sort(key=lambda x: x[1])
+        
+        for filepath, _ in command_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+        
+        return None
+    
+    def send_response(self, command_id: str, status: str, result: Dict = None, error: str = None):
+        """"""发送响应""""""
+        response = {
+            ""command_id"": command_id,
+            ""status"": status,
+            ""result"": result,
+            ""error"": error,
+            ""timestamp"": datetime.now().isoformat()
+        }
+        
+        response_file = os.path.join(self.responses_dir, f""{command_id}.json"")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            json.dump(response, f, ensure_ascii=False, indent=2)
+        
+        # 删除命令文件
+        command_file = os.path.join(self.commands_dir, f""{command_id}.json"")
+        try:
+            os.remove(command_file)
+        except OSError:
+            pass
+    
+    async def handle_interview(self, command_id: str, agent_id: int, prompt: str) -> bool:
+        """"""
+        处理单个Agent采访命令
+        
+        Returns:
+            True 表示成功，False 表示失败
+        """"""
+        try:
+            # 获取Agent
+            agent = self.agent_graph.get_agent(agent_id)
+            
+            # 创建Interview动作
+            interview_action = ManualAction(
+                action_type=ActionType.INTERVIEW,
+                action_args={""prompt"": prompt}
+            )
+            
+            # 执行Interview
+            actions = {agent: interview_action}
+            await self.env.step(actions)
+            
+            # 从数据库获取结果
+            result = self._get_interview_result(agent_id)
+            
+            self.send_response(command_id, ""completed"", result=result)
+            print(f""  Interview完成: agent_id={agent_id}"")
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f""  Interview失败: agent_id={agent_id}, error={error_msg}"")
+            self.send_response(command_id, ""failed"", error=error_msg)
+            return False
+    
+    async def handle_batch_interview(self, command_id: str, interviews: List[Dict]) -> bool:
+        """"""
+        处理批量采访命令
+        
+        Args:
+            interviews: [{""agent_id"": int, ""prompt"": str}, ...]
+        """"""
+        try:
+            # 构建动作字典
+            actions = {}
+            agent_prompts = {}  # 记录每个agent的prompt
+            
+            for interview in interviews:
+                agent_id = interview.get(""agent_id"")
+                prompt = interview.get(""prompt"", """")
+                
+                try:
+                    agent = self.agent_graph.get_agent(agent_id)
+                    actions[agent] = ManualAction(
+                        action_type=ActionType.INTERVIEW,
+                        action_args={""prompt"": prompt}
+                    )
+                    agent_prompts[agent_id] = prompt
+                except Exception as e:
+                    print(f""  警告: 无法获取Agent {agent_id}: {e}"")
+            
+            if not actions:
+                self.send_response(command_id, ""failed"", error=""没有有效的Agent"")
+                return False
+            
+            # 执行批量Interview
+            await self.env.step(actions)
+            
+            # 获取所有结果
+            results = {}
+            for agent_id in agent_prompts.keys():
+                result =
+... [truncated]",""
+"Class:backend/scripts/run_twitter_simulation.py:TwitterSimulationRunner:384","TwitterSimulationRunner","backend/scripts/run_twitter_simulation.py",384,703,true,"
+
+class TwitterSimulationRunner:
+    """"""Twitter模拟运行器""""""
+    
+    # Twitter可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
+    AVAILABLE_ACTIONS = [
+        ActionType.CREATE_POST,
+        ActionType.LIKE_POST,
+        ActionType.REPOST,
+        ActionType.FOLLOW,
+        ActionType.DO_NOTHING,
+        ActionType.QUOTE_POST,
+    ]
+    
+    def __init__(self, config_path: str, wait_for_commands: bool = True):
+        """"""
+        初始化模拟运行器
+        
+        Args:
+            config_path: 配置文件路径 (simulation_config.json)
+            wait_for_commands: 模拟完成后是否等待命令（默认True）
+        """"""
+        self.config_path = config_path
+        self.config = self._load_config()
+        self.simulation_dir = os.path.dirname(config_path)
+        self.wait_for_commands = wait_for_commands
+        self.env = None
+        self.agent_graph = None
+        self.ipc_handler = None
+        
+    def _load_config(self) -> Dict[str, Any]:
+        """"""加载配置文件""""""
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def _get_profile_path(self) -> str:
+        """"""获取Profile文件路径（OASIS Twitter使用CSV格式）""""""
+        return os.path.join(self.simulation_dir, ""twitter_profiles.csv"")
+    
+    def _get_db_path(self) -> str:
+        """"""获取数据库路径""""""
+        return os.path.join(self.simulation_dir, ""twitter_simulation.db"")
+    
+    def _create_model(self):
+        """"""
+        创建LLM模型
+        
+        统一使用项目根目录 .env 文件中的配置（优先级最高）：
+        - LLM_API_KEY: API密钥
+        - LLM_BASE_URL: API基础URL
+        - LLM_MODEL_NAME: 模型名称
+        """"""
+        # 优先从 .env 读取配置
+        llm_api_key = os.environ.get(""LLM_API_KEY"", """")
+        llm_base_url = os.environ.get(""LLM_BASE_URL"", """")
+        llm_model = os.environ.get(""LLM_MODEL_NAME"", """")
+        
+        # 如果 .env 中没有，则使用 config 作为备用
+        if not llm_model:
+            llm_model = self.config.get(""llm_model"", ""gpt-4o-mini"")
+        
+        # 设置 camel-ai 所需的环境变量
+        if llm_api_key:
+            os.environ[""OPENAI_API_KEY""] = llm_api_key
+        
+        if not os.environ.get(""OPENAI_API_KEY""):
+            raise ValueError(""缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY"")
+        
+        if llm_base_url:
+            os.environ[""OPENAI_API_BASE_URL""] = llm_base_url
+        
+        print(f""LLM配置: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}..."")
+        
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI,
+            model_type=llm_model,
+        )
+    
+    def _get_active_agents_for_round(
+        self, 
+        env, 
+        current_hour: int,
+        round_num: int
+    ) -> List:
+        """"""
+        根据时间和配置决定本轮激活哪些Agent
+        
+        Args:
+            env: OASIS环境
+            current_hour: 当前模拟小时（0-23）
+            round_num: 当前轮数
+            
+        Returns:
+            激活的Agent列表
+        """"""
+        time_config = self.config.get(""time_config"", {})
+        agent_configs = self.config.get(""agent_configs"", [])
+        
+        # 基础激活数量
+        base_min = time_config.get(""agents_per_hour_min"", 5)
+        base_max = time_config.get(""agents_per_hour_max"", 20)
+        
+        # 根据时段调整
+        peak_hours = time_config.get(""peak_hours"", [9, 10, 11, 14, 15, 20, 21, 22])
+        off_peak_hours = time_config.get(""off_peak_hours"", [0, 1, 2, 3, 4, 5])
+        
+        if current_hour in peak_hours:
+            multiplier = time_config.get(""peak_activity_multiplier"", 1.5)
+        elif current_hour in off_peak_hours:
+            multiplier = time_config.get(""off_peak_activity_multiplier"", 0.3)
+        else:
+            multiplier = 1.0
+        
+        target_count = int(random.uniform(base_min, base_max) * multiplier)
+        
+        # 根据每个Agent的配置计算激活概率
+        candidates = []
+        for cfg in agent_configs:
+            agent_id = cfg.get(""agent_id"", 0)
+            active_hours = cfg.get(""active_hours"", list(range(8, 23)))
+            activity_level = cfg.get(""activity_level"", 0.5)
+            
+            # 检查是否在活跃时间
+            if current_hour not in active_hours:
+                continue
+            
+            # 根据活跃度计算概率
+            if random.random() < activity_level:
+                candidates.append(agent_id)
+        
+        # 随机选择
+        selected_ids = random.sample(
+            candidates, 
+            min(target_count, len(candidates))
+        ) if candidates else []
+        
+        # 转换为Agent对象
+        active_agents = []
+        for agent_id in selected_ids:
+            try:
+                agent = env.agent_graph.get_agent(agent_id)
+                active_agents.append((agent_id, agent))
+            except Exception:
+                pass
+        
+        return active_agents
+    
+    async def run(self, max_rounds: int = None):
+        """"""运行Twitter模拟
+        
+        Args:
+            max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
+        """"""
+        print(
+... [truncated]",""
+"Class:backend/scripts/run_reddit_simulation.py:UnicodeFormatter:52","UnicodeFormatter","backend/scripts/run_reddit_simulation.py",52,66,true,"
+
+class UnicodeFormatter(logging.Formatter):
+    """"""自定义格式化器，将 Unicode 转义序列转换为可读字符""""""
+    
+    UNICODE_ESCAPE_PATTERN = re.compile(r'\\u([0-9a-fA-F]{4})')
+    
+    def format(self, record):
+        result = super().format(record)
+        
+        def replace_unicode(match):
+            try:
+                return chr(int(match.group(1), 16))
+            except (ValueError, OverflowError):
+                return match.group(0)
+        
+        return self.UNICODE_ESCAPE_PATTERN.sub(replace_unicode, result)
+
+
+",""
+"Class:backend/scripts/run_reddit_simulation.py:MaxTokensWarningFilter:69","MaxTokensWarningFilter","backend/scripts/run_reddit_simulation.py",69,76,true,"
+
+class MaxTokensWarningFilter(logging.Filter):
+    """"""过滤掉 camel-ai 关于 max_tokens 的警告（我们故意不设置 max_tokens，让模型自行决定）""""""
+    
+    def filter(self, record):
+        # 过滤掉包含 max_tokens 警告的日志
+        if ""max_tokens"" in record.getMessage() and ""Invalid or missing"" in record.getMessage():
+            return False
+        return True
+
+
+",""
+"Class:backend/scripts/run_reddit_simulation.py:CommandType:138","CommandType","backend/scripts/run_reddit_simulation.py",138,142,true,"ENV_STATUS_FILE = ""env_status.json""
+
+class CommandType:
+    """"""命令类型常量""""""
+    INTERVIEW = ""interview""
+    BATCH_INTERVIEW = ""batch_interview""
+    CLOSE_ENV = ""close_env""
+
+
+",""
+"Class:backend/scripts/run_reddit_simulation.py:IPCHandler:145","IPCHandler","backend/scripts/run_reddit_simulation.py",145,381,true,"
+
+class IPCHandler:
+    """"""IPC命令处理器""""""
+    
+    def __init__(self, simulation_dir: str, env, agent_graph):
+        self.simulation_dir = simulation_dir
+        self.env = env
+        self.agent_graph = agent_graph
+        self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
+        self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
+        self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
+        self._running = True
+        
+        # 确保目录存在
+        os.makedirs(self.commands_dir, exist_ok=True)
+        os.makedirs(self.responses_dir, exist_ok=True)
+    
+    def update_status(self, status: str):
+        """"""更新环境状态""""""
+        with open(self.status_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                ""status"": status,
+                ""timestamp"": datetime.now().isoformat()
+            }, f, ensure_ascii=False, indent=2)
+    
+    def poll_command(self) -> Optional[Dict[str, Any]]:
+        """"""轮询获取待处理命令""""""
+        if not os.path.exists(self.commands_dir):
+            return None
+        
+        # 获取命令文件（按时间排序）
+        command_files = []
+        for filename in os.listdir(self.commands_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(self.commands_dir, filename)
+                command_files.append((filepath, os.path.getmtime(filepath)))
+        
+        command_files.sort(key=lambda x: x[1])
+        
+        for filepath, _ in command_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+        
+        return None
+    
+    def send_response(self, command_id: str, status: str, result: Dict = None, error: str = None):
+        """"""发送响应""""""
+        response = {
+            ""command_id"": command_id,
+            ""status"": status,
+            ""result"": result,
+            ""error"": error,
+            ""timestamp"": datetime.now().isoformat()
+        }
+        
+        response_file = os.path.join(self.responses_dir, f""{command_id}.json"")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            json.dump(response, f, ensure_ascii=False, indent=2)
+        
+        # 删除命令文件
+        command_file = os.path.join(self.commands_dir, f""{command_id}.json"")
+        try:
+            os.remove(command_file)
+        except OSError:
+            pass
+    
+    async def handle_interview(self, command_id: str, agent_id: int, prompt: str) -> bool:
+        """"""
+        处理单个Agent采访命令
+        
+        Returns:
+            True 表示成功，False 表示失败
+        """"""
+        try:
+            # 获取Agent
+            agent = self.agent_graph.get_agent(agent_id)
+            
+            # 创建Interview动作
+            interview_action = ManualAction(
+                action_type=ActionType.INTERVIEW,
+                action_args={""prompt"": prompt}
+            )
+            
+            # 执行Interview
+            actions = {agent: interview_action}
+            await self.env.step(actions)
+            
+            # 从数据库获取结果
+            result = self._get_interview_result(agent_id)
+            
+            self.send_response(command_id, ""completed"", result=result)
+            print(f""  Interview完成: agent_id={agent_id}"")
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f""  Interview失败: agent_id={agent_id}, error={error_msg}"")
+            self.send_response(command_id, ""failed"", error=error_msg)
+            return False
+    
+    async def handle_batch_interview(self, command_id: str, interviews: List[Dict]) -> bool:
+        """"""
+        处理批量采访命令
+        
+        Args:
+            interviews: [{""agent_id"": int, ""prompt"": str}, ...]
+        """"""
+        try:
+            # 构建动作字典
+            actions = {}
+            agent_prompts = {}  # 记录每个agent的prompt
+            
+            for interview in interviews:
+                agent_id = interview.get(""agent_id"")
+                prompt = interview.get(""prompt"", """")
+                
+                try:
+                    agent = self.agent_graph.get_agent(agent_id)
+                    actions[agent] = ManualAction(
+                        action_type=ActionType.INTERVIEW,
+                        action_args={""prompt"": prompt}
+                    )
+                    agent_prompts[agent_id] = prompt
+                except Exception as e:
+                    print(f""  警告: 无法获取Agent {agent_id}: {e}"")
+            
+            if not actions:
+                self.send_response(command_id, ""failed"", error=""没有有效的Agent"")
+                return False
+            
+            # 执行批量Interview
+            await self.env.step(actions)
+            
+            # 获取所有结果
+            results = {}
+            for agent_id in agent_prompts.keys():
+                result =
+... [truncated]",""
+"Class:backend/scripts/run_reddit_simulation.py:RedditSimulationRunner:384","RedditSimulationRunner","backend/scripts/run_reddit_simulation.py",384,691,true,"
+
+class RedditSimulationRunner:
+    """"""Reddit模拟运行器""""""
+    
+    # Reddit可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
+    AVAILABLE_ACTIONS = [
+        ActionType.LIKE_POST,
+        ActionType.DISLIKE_POST,
+        ActionType.CREATE_POST,
+        ActionType.CREATE_COMMENT,
+        ActionType.LIKE_COMMENT,
+        ActionType.DISLIKE_COMMENT,
+        ActionType.SEARCH_POSTS,
+        ActionType.SEARCH_USER,
+        ActionType.TREND,
+        ActionType.REFRESH,
+        ActionType.DO_NOTHING,
+        ActionType.FOLLOW,
+        ActionType.MUTE,
+    ]
+    
+    def __init__(self, config_path: str, wait_for_commands: bool = True):
+        """"""
+        初始化模拟运行器
+        
+        Args:
+            config_path: 配置文件路径 (simulation_config.json)
+            wait_for_commands: 模拟完成后是否等待命令（默认True）
+        """"""
+        self.config_path = config_path
+        self.config = self._load_config()
+        self.simulation_dir = os.path.dirname(config_path)
+        self.wait_for_commands = wait_for_commands
+        self.env = None
+        self.agent_graph = None
+        self.ipc_handler = None
+        
+    def _load_config(self) -> Dict[str, Any]:
+        """"""加载配置文件""""""
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def _get_profile_path(self) -> str:
+        """"""获取Profile文件路径""""""
+        return os.path.join(self.simulation_dir, ""reddit_profiles.json"")
+    
+    def _get_db_path(self) -> str:
+        """"""获取数据库路径""""""
+        return os.path.join(self.simulation_dir, ""reddit_simulation.db"")
+    
+    def _create_model(self):
+        """"""
+        创建LLM模型
+        
+        统一使用项目根目录 .env 文件中的配置（优先级最高）：
+        - LLM_API_KEY: API密钥
+        - LLM_BASE_URL: API基础URL
+        - LLM_MODEL_NAME: 模型名称
+        """"""
+        # 优先从 .env 读取配置
+        llm_api_key = os.environ.get(""LLM_API_KEY"", """")
+        llm_base_url = os.environ.get(""LLM_BASE_URL"", """")
+        llm_model = os.environ.get(""LLM_MODEL_NAME"", """")
+        
+        # 如果 .env 中没有，则使用 config 作为备用
+        if not llm_model:
+            llm_model = self.config.get(""llm_model"", ""gpt-4o-mini"")
+        
+        # 设置 camel-ai 所需的环境变量
+        if llm_api_key:
+            os.environ[""OPENAI_API_KEY""] = llm_api_key
+        
+        if not os.environ.get(""OPENAI_API_KEY""):
+            raise ValueError(""缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY"")
+        
+        if llm_base_url:
+            os.environ[""OPENAI_API_BASE_URL""] = llm_base_url
+        
+        print(f""LLM配置: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}..."")
+        
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI,
+            model_type=llm_model,
+        )
+    
+    def _get_active_agents_for_round(
+        self, 
+        env, 
+        current_hour: int,
+        round_num: int
+    ) -> List:
+        """"""
+        根据时间和配置决定本轮激活哪些Agent
+        """"""
+        time_config = self.config.get(""time_config"", {})
+        agent_configs = self.config.get(""agent_configs"", [])
+        
+        base_min = time_config.get(""agents_per_hour_min"", 5)
+        base_max = time_config.get(""agents_per_hour_max"", 20)
+        
+        peak_hours = time_config.get(""peak_hours"", [9, 10, 11, 14, 15, 20, 21, 22])
+        off_peak_hours = time_config.get(""off_peak_hours"", [0, 1, 2, 3, 4, 5])
+        
+        if current_hour in peak_hours:
+            multiplier = time_config.get(""peak_activity_multiplier"", 1.5)
+        elif current_hour in off_peak_hours:
+            multiplier = time_config.get(""off_peak_activity_multiplier"", 0.3)
+        else:
+            multiplier = 1.0
+        
+        target_count = int(random.uniform(base_min, base_max) * multiplier)
+        
+        candidates = []
+        for cfg in agent_configs:
+            agent_id = cfg.get(""agent_id"", 0)
+            active_hours = cfg.get(""active_hours"", list(range(8, 23)))
+            activity_level = cfg.get(""activity_level"", 0.5)
+            
+            if current_hour not in active_hours:
+                continue
+            
+            if random.random() < activity_level:
+                candidates.append(agent_id)
+        
+        selected_ids = random.sample(
+            candidates, 
+            min(target_count, len(candidates))
+        ) if candidates else []
+        
+        active_agents = []
+        for agent_id in selected_ids:
+            try:
+                agent = env.agent_graph.get_agent(agent_id)
+                active_agents.append((agent_id, agent))
+            except Exception:
+                pass
+        
+        return active_agents
+    
+    async def run(self, max_rounds: int = None):
+        """"""运行Reddit模拟
+        
+        Args:
+            max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
+        """"""
+        print(""="" * 60)
+        print(""OASIS Reddit模拟"")
+        print(f""配置文件: {self.config_path}"")
+        print(f""模拟ID: {self.config.get(
+... [truncated]",""
+"Class:backend/scripts/run_parallel_simulation.py:MaxTokensWarningFilter:105","MaxTokensWarningFilter","backend/scripts/run_parallel_simulation.py",105,112,true,"
+
+class MaxTokensWarningFilter(logging.Filter):
+    """"""过滤掉 camel-ai 关于 max_tokens 的警告（我们故意不设置 max_tokens，让模型自行决定）""""""
+    
+    def filter(self, record):
+        # 过滤掉包含 max_tokens 警告的日志
+        if ""max_tokens"" in record.getMessage() and ""Invalid or missing"" in record.getMessage():
+            return False
+        return True
+
+
+",""
+"Class:backend/scripts/run_parallel_simulation.py:CommandType:209","CommandType","backend/scripts/run_parallel_simulation.py",209,213,true,"ENV_STATUS_FILE = ""env_status.json""
+
+class CommandType:
+    """"""命令类型常量""""""
+    INTERVIEW = ""interview""
+    BATCH_INTERVIEW = ""batch_interview""
+    CLOSE_ENV = ""close_env""
+
+
+",""
+"Class:backend/scripts/run_parallel_simulation.py:ParallelIPCHandler:216","ParallelIPCHandler","backend/scripts/run_parallel_simulation.py",216,600,true,"
+
+class ParallelIPCHandler:
+    """"""
+    双平台IPC命令处理器
+    
+    管理两个平台的环境，处理Interview命令
+    """"""
+    
+    def __init__(
+        self,
+        simulation_dir: str,
+        twitter_env=None,
+        twitter_agent_graph=None,
+        reddit_env=None,
+        reddit_agent_graph=None
+    ):
+        self.simulation_dir = simulation_dir
+        self.twitter_env = twitter_env
+        self.twitter_agent_graph = twitter_agent_graph
+        self.reddit_env = reddit_env
+        self.reddit_agent_graph = reddit_agent_graph
+        
+        self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
+        self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
+        self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
+        
+        # 确保目录存在
+        os.makedirs(self.commands_dir, exist_ok=True)
+        os.makedirs(self.responses_dir, exist_ok=True)
+    
+    def update_status(self, status: str):
+        """"""更新环境状态""""""
+        with open(self.status_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                ""status"": status,
+                ""twitter_available"": self.twitter_env is not None,
+                ""reddit_available"": self.reddit_env is not None,
+                ""timestamp"": datetime.now().isoformat()
+            }, f, ensure_ascii=False, indent=2)
+    
+    def poll_command(self) -> Optional[Dict[str, Any]]:
+        """"""轮询获取待处理命令""""""
+        if not os.path.exists(self.commands_dir):
+            return None
+        
+        # 获取命令文件（按时间排序）
+        command_files = []
+        for filename in os.listdir(self.commands_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(self.commands_dir, filename)
+                command_files.append((filepath, os.path.getmtime(filepath)))
+        
+        command_files.sort(key=lambda x: x[1])
+        
+        for filepath, _ in command_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+        
+        return None
+    
+    def send_response(self, command_id: str, status: str, result: Dict = None, error: str = None):
+        """"""发送响应""""""
+        response = {
+            ""command_id"": command_id,
+            ""status"": status,
+            ""result"": result,
+            ""error"": error,
+            ""timestamp"": datetime.now().isoformat()
+        }
+        
+        response_file = os.path.join(self.responses_dir, f""{command_id}.json"")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            json.dump(response, f, ensure_ascii=False, indent=2)
+        
+        # 删除命令文件
+        command_file = os.path.join(self.commands_dir, f""{command_id}.json"")
+        try:
+            os.remove(command_file)
+        except OSError:
+            pass
+    
+    def _get_env_and_graph(self, platform: str):
+        """"""
+        获取指定平台的环境和agent_graph
+        
+        Args:
+            platform: 平台名称 (""twitter"" 或 ""reddit"")
+            
+        Returns:
+            (env, agent_graph, platform_name) 或 (None, None, None)
+        """"""
+        if platform == ""twitter"" and self.twitter_env:
+            return self.twitter_env, self.twitter_agent_graph, ""twitter""
+        elif platform == ""reddit"" and self.reddit_env:
+            return self.reddit_env, self.reddit_agent_graph, ""reddit""
+        else:
+            return None, None, None
+    
+    async def _interview_single_platform(self, agent_id: int, prompt: str, platform: str) -> Dict[str, Any]:
+        """"""
+        在单个平台上执行Interview
+        
+        Returns:
+            包含结果的字典，或包含error的字典
+        """"""
+        env, agent_graph, actual_platform = self._get_env_and_graph(platform)
+        
+        if not env or not agent_graph:
+            return {""platform"": platform, ""error"": f""{platform}平台不可用""}
+        
+        try:
+            agent = agent_graph.get_agent(agent_id)
+            interview_action = ManualAction(
+                action_type=ActionType.INTERVIEW,
+                action_args={""prompt"": prompt}
+            )
+            actions = {agent: interview_action}
+            await env.step(actions)
+            
+            result = self._get_interview_result(agent_id, actual_platform)
+            result[""platform""] = actual_platform
+            return result
+            
+        except Exception as e:
+            return {""platform"": platform, ""error"": str(e)}
+    
+    async def handle_interview(self, command_id: str, agent_id: int, prompt: str, platform: str = None) -> bool:
+        """"""
+        处理单个Agent采访命令
+        
+        Args:
+            command_id: 命令ID
+            agent_id: Agent ID
+            prompt: 采访问题
+            platform: 指定平台（可选）
+                - ""twitter"": 只采访Twitter平台
+                - ""reddit"": 只采访Reddit平台
+                - None/不指定: 同时采访两个平台，返回整合结果
+            
+ 
+... [truncated]",""
+"Class:backend/scripts/run_parallel_simulation.py:PlatformSimulation:1092","PlatformSimulation","backend/scripts/run_parallel_simulation.py",1092,1097,true,"
+
+class PlatformSimulation:
+    """"""平台模拟结果容器""""""
+    def __init__(self):
+        self.env = None
+        self.agent_graph = None
+        self.total_actions = 0
+
+
+",""
+"Class:backend/scripts/action_logger.py:PlatformActionLogger:21","PlatformActionLogger","backend/scripts/action_logger.py",21,115,true,"
+
+class PlatformActionLogger:
+    """"""单平台动作日志记录器""""""
+    
+    def __init__(self, platform: str, base_dir: str):
+        """"""
+        初始化日志记录器
+        
+        Args:
+            platform: 平台名称 (twitter/reddit)
+            base_dir: 模拟目录的基础路径
+        """"""
+        self.platform = platform
+        self.base_dir = base_dir
+        self.log_dir = os.path.join(base_dir, platform)
+        self.log_path = os.path.join(self.log_dir, ""actions.jsonl"")
+        self._ensure_dir()
+    
+    def _ensure_dir(self):
+        """"""确保目录存在""""""
+        os.makedirs(self.log_dir, exist_ok=True)
+    
+    def log_action(
+        self,
+        round_num: int,
+        agent_id: int,
+        agent_name: str,
+        action_type: str,
+        action_args: Optional[Dict[str, Any]] = None,
+        result: Optional[str] = None,
+        success: bool = True
+    ):
+        """"""记录一个动作""""""
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""agent_id"": agent_id,
+            ""agent_name"": agent_name,
+            ""action_type"": action_type,
+            ""action_args"": action_args or {},
+            ""result"": result,
+            ""success"": success,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_round_start(self, round_num: int, simulated_hour: int):
+        """"""记录轮次开始""""""
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""event_type"": ""round_start"",
+            ""simulated_hour"": simulated_hour,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_round_end(self, round_num: int, actions_count: int):
+        """"""记录轮次结束""""""
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""event_type"": ""round_end"",
+            ""actions_count"": actions_count,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_simulation_start(self, config: Dict[str, Any]):
+        """"""记录模拟开始""""""
+        entry = {
+            ""timestamp"": datetime.now().isoformat(),
+            ""event_type"": ""simulation_start"",
+            ""platform"": self.platform,
+            ""total_rounds"": config.get(""time_config"", {}).get(""total_simulation_hours"", 72) * 2,
+            ""agents_count"": len(config.get(""agent_configs"", [])),
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_simulation_end(self, total_rounds: int, total_actions: int):
+        """"""记录模拟结束""""""
+        entry = {
+            ""timestamp"": datetime.now().isoformat(),
+            ""event_type"": ""simulation_end"",
+            ""platform"": self.platform,
+            ""total_rounds"": total_rounds,
+            ""total_actions"": total_actions,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+",""
+"Class:backend/scripts/action_logger.py:SimulationLogManager:118","SimulationLogManager","backend/scripts/action_logger.py",118,195,true,"
+
+class SimulationLogManager:
+    """"""
+    模拟日志管理器
+    统一管理所有日志文件，按平台分离
+    """"""
+    
+    def __init__(self, simulation_dir: str):
+        """"""
+        初始化日志管理器
+        
+        Args:
+            simulation_dir: 模拟目录路径
+        """"""
+        self.simulation_dir = simulation_dir
+        self.twitter_logger: Optional[PlatformActionLogger] = None
+        self.reddit_logger: Optional[PlatformActionLogger] = None
+        self._main_logger: Optional[logging.Logger] = None
+        
+        # 设置主日志
+        self._setup_main_logger()
+    
+    def _setup_main_logger(self):
+        """"""设置主模拟日志""""""
+        log_path = os.path.join(self.simulation_dir, ""simulation.log"")
+        
+        # 创建 logger
+        self._main_logger = logging.getLogger(f""simulation.{os.path.basename(self.simulation_dir)}"")
+        self._main_logger.setLevel(logging.INFO)
+        self._main_logger.handlers.clear()
+        
+        # 文件处理器
+        file_handler = logging.FileHandler(log_path, encoding='utf-8', mode='w')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        self._main_logger.addHandler(file_handler)
+        
+        # 控制台处理器
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(logging.Formatter(
+            '[%(asctime)s] %(message)s',
+            datefmt='%H:%M:%S'
+        ))
+        self._main_logger.addHandler(console_handler)
+        
+        self._main_logger.propagate = False
+    
+    def get_twitter_logger(self) -> PlatformActionLogger:
+        """"""获取 Twitter 平台日志记录器""""""
+        if self.twitter_logger is None:
+            self.twitter_logger = PlatformActionLogger(""twitter"", self.simulation_dir)
+        return self.twitter_logger
+    
+    def get_reddit_logger(self) -> PlatformActionLogger:
+        """"""获取 Reddit 平台日志记录器""""""
+        if self.reddit_logger is None:
+            self.reddit_logger = PlatformActionLogger(""reddit"", self.simulation_dir)
+        return self.reddit_logger
+    
+    def log(self, message: str, level: str = ""info""):
+        """"""记录主日志""""""
+        if self._main_logger:
+            getattr(self._main_logger, level.lower(), self._main_logger.info)(message)
+    
+    def info(self, message: str):
+        self.log(message, ""info"")
+    
+    def warning(self, message: str):
+        self.log(message, ""warning"")
+    
+    def error(self, message: str):
+        self.log(message, ""error"")
+    
+    def debug(self, message: str):
+        self.log(message, ""debug"")
+
+
+",""
+"Class:backend/scripts/action_logger.py:ActionLogger:200","ActionLogger","backend/scripts/action_logger.py",200,287,true,"# ============ 兼容旧接口 ============
+
+class ActionLogger:
+    """"""
+    动作日志记录器（兼容旧接口）
+    建议使用 SimulationLogManager 代替
+    """"""
+    
+    def __init__(self, log_path: str):
+        self.log_path = log_path
+        self._ensure_dir()
+    
+    def _ensure_dir(self):
+        log_dir = os.path.dirname(self.log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+    
+    def log_action(
+        self,
+        round_num: int,
+        platform: str,
+        agent_id: int,
+        agent_name: str,
+        action_type: str,
+        action_args: Optional[Dict[str, Any]] = None,
+        result: Optional[str] = None,
+        success: bool = True
+    ):
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""platform"": platform,
+            ""agent_id"": agent_id,
+            ""agent_name"": agent_name,
+            ""action_type"": action_type,
+            ""action_args"": action_args or {},
+            ""result"": result,
+            ""success"": success,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_round_start(self, round_num: int, simulated_hour: int, platform: str):
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""platform"": platform,
+            ""event_type"": ""round_start"",
+            ""simulated_hour"": simulated_hour,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_round_end(self, round_num: int, actions_count: int, platform: str):
+        entry = {
+            ""round"": round_num,
+            ""timestamp"": datetime.now().isoformat(),
+            ""platform"": platform,
+            ""event_type"": ""round_end"",
+            ""actions_count"": actions_count,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_simulation_start(self, platform: str, config: Dict[str, Any]):
+        entry = {
+            ""timestamp"": datetime.now().isoformat(),
+            ""platform"": platform,
+            ""event_type"": ""simulation_start"",
+            ""total_rounds"": config.get(""time_config"", {}).get(""total_simulation_hours"", 72) * 2,
+            ""agents_count"": len(config.get(""agent_configs"", [])),
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    def log_simulation_end(self, platform: str, total_rounds: int, total_actions: int):
+        entry = {
+            ""timestamp"": datetime.now().isoformat(),
+            ""platform"": platform,
+            ""event_type"": ""simulation_end"",
+            ""total_rounds"": total_rounds,
+            ""total_actions"": total_actions,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+",""
+"Class:backend/app/utils/retry.py:RetryableAPIClient:131","RetryableAPIClient","backend/app/utils/retry.py",131,236,true,"
+
+class RetryableAPIClient:
+    """"""
+    可重试的API客户端封装
+    """"""
+    
+    def __init__(
+        self,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+        max_delay: float = 30.0,
+        backoff_factor: float = 2.0
+    ):
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.backoff_factor = backoff_factor
+    
+    def call_with_retry(
+        self,
+        func: Callable,
+        *args,
+        exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        **kwargs
+    ) -> Any:
+        """"""
+        执行函数调用并在失败时重试
+        
+        Args:
+            func: 要调用的函数
+            *args: 函数参数
+            exceptions: 需要重试的异常类型
+            **kwargs: 函数关键字参数
+            
+        Returns:
+            函数返回值
+        """"""
+        last_exception = None
+        delay = self.initial_delay
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+                
+            except exceptions as e:
+                last_exception = e
+                
+                if attempt == self.max_retries:
+                    logger.error(f""API调用在 {self.max_retries} 次重试后仍失败: {str(e)}"")
+                    raise
+                
+                current_delay = min(delay, self.max_delay)
+                current_delay = current_delay * (0.5 + random.random())
+                
+                logger.warning(
+                    f""API调用第 {attempt + 1} 次尝试失败: {str(e)}, ""
+                    f""{current_delay:.1f}秒后重试...""
+                )
+                
+                time.sleep(current_delay)
+                delay *= self.backoff_factor
+        
+        raise last_exception
+    
+    def call_batch_with_retry(
+        self,
+        items: list,
+        process_func: Callable,
+        exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        continue_on_failure: bool = True
+    ) -> Tuple[list, list]:
+        """"""
+        批量调用并对每个失败项单独重试
+        
+        Args:
+            items: 要处理的项目列表
+            process_func: 处理函数，接收单个item作为参数
+            exceptions: 需要重试的异常类型
+            continue_on_failure: 单项失败后是否继续处理其他项
+            
+        Returns:
+            (成功结果列表, 失败项列表)
+        """"""
+        results = []
+        failures = []
+        
+        for idx, item in enumerate(items):
+            try:
+                result = self.call_with_retry(
+                    process_func,
+                    item,
+                    exceptions=exceptions
+                )
+                results.append(result)
+                
+            except Exception as e:
+                logger.error(f""处理第 {idx + 1} 项失败: {str(e)}"")
+                failures.append({
+                    ""index"": idx,
+                    ""item"": item,
+                    ""error"": str(e)
+                })
+                
+                if not continue_on_failure:
+                    raise
+        
+        return results, failures
+
+",""
+"Class:backend/app/utils/llm_client.py:LLMClient:13","LLMClient","backend/app/utils/llm_client.py",13,101,true,"
+
+class LLMClient:
+    """"""LLM客户端""""""
+    
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None
+    ):
+        self.api_key = api_key or Config.LLM_API_KEY
+        self.base_url = base_url or Config.LLM_BASE_URL
+        self.model = model or Config.LLM_MODEL_NAME
+        
+        if not self.api_key:
+            raise ValueError(""LLM_API_KEY 未配置"")
+        
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+    
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None
+    ) -> str:
+        """"""
+        发送聊天请求
+        
+        Args:
+            messages: 消息列表
+            temperature: 温度参数
+            max_tokens: 最大token数
+            response_format: 响应格式（如JSON模式）
+            
+        Returns:
+            模型响应文本
+        """"""
+        kwargs = {
+            ""model"": self.model,
+            ""messages"": messages,
+            ""temperature"": temperature,
+            ""max_tokens"": max_tokens,
+        }
+        
+        if response_format:
+            kwargs[""response_format""] = response_format
+        
+        response = self.client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
+        # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
+        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        return content
+    
+    def chat_json(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 4096
+    ) -> Dict[str, Any]:
+        """"""
+        发送聊天请求并返回JSON
+        
+        Args:
+            messages: 消息列表
+            temperature: 温度参数
+            max_tokens: 最大token数
+            
+        Returns:
+            解析后的JSON对象
+        """"""
+        response = self.chat(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={""type"": ""json_object""}
+        )
+        # 清理markdown代码块标记
+        cleaned_response = response.strip()
+        cleaned_response = re.sub(r'^```(?:json)?\s*\n?', '', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'\n?```\s*$', '', cleaned_response)
+        cleaned_response = cleaned_response.strip()
+
+        try:
+            return json.loads(cleaned_response)
+        except json.JSONDecodeError:
+            raise ValueError(f""LLM返回的JSON格式无效: {cleaned_response}"")
+
+",""
+"Class:backend/app/utils/file_parser.py:FileParser:60","FileParser","backend/app/utils/file_parser.py",60,143,true,"
+
+class FileParser:
+    """"""文件解析器""""""
+    
+    SUPPORTED_EXTENSIONS = {'.pdf', '.md', '.markdown', '.txt'}
+    
+    @classmethod
+    def extract_text(cls, file_path: str) -> str:
+        """"""
+        从文件中提取文本
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            提取的文本内容
+        """"""
+        path = Path(file_path)
+        
+        if not path.exists():
+            raise FileNotFoundError(f""文件不存在: {file_path}"")
+        
+        suffix = path.suffix.lower()
+        
+        if suffix not in cls.SUPPORTED_EXTENSIONS:
+            raise ValueError(f""不支持的文件格式: {suffix}"")
+        
+        if suffix == '.pdf':
+            return cls._extract_from_pdf(file_path)
+        elif suffix in {'.md', '.markdown'}:
+            return cls._extract_from_md(file_path)
+        elif suffix == '.txt':
+            return cls._extract_from_txt(file_path)
+        
+        raise ValueError(f""无法处理的文件格式: {suffix}"")
+    
+    @staticmethod
+    def _extract_from_pdf(file_path: str) -> str:
+        """"""从PDF提取文本""""""
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError(""需要安装PyMuPDF: pip install PyMuPDF"")
+        
+        text_parts = []
+        with fitz.open(file_path) as doc:
+            for page in doc:
+                text = page.get_text()
+                if text.strip():
+                    text_parts.append(text)
+        
+        return ""\n\n"".join(text_parts)
+    
+    @staticmethod
+    def _extract_from_md(file_path: str) -> str:
+        """"""从Markdown提取文本，支持自动编码检测""""""
+        return _read_text_with_fallback(file_path)
+    
+    @staticmethod
+    def _extract_from_txt(file_path: str) -> str:
+        """"""从TXT提取文本，支持自动编码检测""""""
+        return _read_text_with_fallback(file_path)
+    
+    @classmethod
+    def extract_from_multiple(cls, file_paths: List[str]) -> str:
+        """"""
+        从多个文件提取文本并合并
+        
+        Args:
+            file_paths: 文件路径列表
+            
+        Returns:
+            合并后的文本
+        """"""
+        all_texts = []
+        
+        for i, file_path in enumerate(file_paths, 1):
+            try:
+                text = cls.extract_text(file_path)
+                filename = Path(file_path).name
+                all_texts.append(f""=== 文档 {i}: {filename} ===\n{text}"")
+            except Exception as e:
+                all_texts.append(f""=== 文档 {i}: {file_path} (提取失败: {str(e)}) ==="")
+        
+        return ""\n\n"".join(all_texts)
+
+
+",""
+"Class:backend/app/services/zep_tools.py:SearchResult:26","SearchResult","backend/app/services/zep_tools.py",26,52,true,"
+@dataclass
+class SearchResult:
+    """"""搜索结果""""""
+    facts: List[str]
+    edges: List[Dict[str, Any]]
+    nodes: List[Dict[str, Any]]
+    query: str
+    total_count: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""facts"": self.facts,
+            ""edges"": self.edges,
+            ""nodes"": self.nodes,
+            ""query"": self.query,
+            ""total_count"": self.total_count
+        }
+    
+    def to_text(self) -> str:
+        """"""转换为文本格式，供LLM理解""""""
+        text_parts = [f""搜索查询: {self.query}"", f""找到 {self.total_count} 条相关信息""]
+        
+        if self.facts:
+            text_parts.append(""\n### 相关事实:"")
+            for i, fact in enumerate(self.facts, 1):
+                text_parts.append(f""{i}. {fact}"")
+        
+        return ""\n"".join(text_parts)
+
+
+",""
+"Class:backend/app/services/zep_tools.py:NodeInfo:56","NodeInfo","backend/app/services/zep_tools.py",56,76,true,"
+@dataclass
+class NodeInfo:
+    """"""节点信息""""""
+    uuid: str
+    name: str
+    labels: List[str]
+    summary: str
+    attributes: Dict[str, Any]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""uuid"": self.uuid,
+            ""name"": self.name,
+            ""labels"": self.labels,
+            ""summary"": self.summary,
+            ""attributes"": self.attributes
+        }
+    
+    def to_text(self) -> str:
+        """"""转换为文本格式""""""
+        entity_type = next((l for l in self.labels if l not in [""Entity"", ""Node""]), ""未知类型"")
+        return f""实体: {self.name} (类型: {entity_type})\n摘要: {self.summary}""
+
+
+",""
+"Class:backend/app/services/zep_tools.py:EdgeInfo:80","EdgeInfo","backend/app/services/zep_tools.py",80,133,true,"
+@dataclass
+class EdgeInfo:
+    """"""边信息""""""
+    uuid: str
+    name: str
+    fact: str
+    source_node_uuid: str
+    target_node_uuid: str
+    source_node_name: Optional[str] = None
+    target_node_name: Optional[str] = None
+    # 时间信息
+    created_at: Optional[str] = None
+    valid_at: Optional[str] = None
+    invalid_at: Optional[str] = None
+    expired_at: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""uuid"": self.uuid,
+            ""name"": self.name,
+            ""fact"": self.fact,
+            ""source_node_uuid"": self.source_node_uuid,
+            ""target_node_uuid"": self.target_node_uuid,
+            ""source_node_name"": self.source_node_name,
+            ""target_node_name"": self.target_node_name,
+            ""created_at"": self.created_at,
+            ""valid_at"": self.valid_at,
+            ""invalid_at"": self.invalid_at,
+            ""expired_at"": self.expired_at
+        }
+    
+    def to_text(self, include_temporal: bool = False) -> str:
+        """"""转换为文本格式""""""
+        source = self.source_node_name or self.source_node_uuid[:8]
+        target = self.target_node_name or self.target_node_uuid[:8]
+        base_text = f""关系: {source} --[{self.name}]--> {target}\n事实: {self.fact}""
+        
+        if include_temporal:
+            valid_at = self.valid_at or ""未知""
+            invalid_at = self.invalid_at or ""至今""
+            base_text += f""\n时效: {valid_at} - {invalid_at}""
+            if self.expired_at:
+                base_text += f"" (已过期: {self.expired_at})""
+        
+        return base_text
+    
+    @property
+    def is_expired(self) -> bool:
+        """"""是否已过期""""""
+        return self.expired_at is not None
+    
+    @property
+    def is_invalid(self) -> bool:
+        """"""是否已失效""""""
+        return self.invalid_at is not None
+
+
+",""
+"Class:backend/app/services/zep_tools.py:InsightForgeResult:137","InsightForgeResult","backend/app/services/zep_tools.py",137,209,true,"
+@dataclass
+class InsightForgeResult:
+    """"""
+    深度洞察检索结果 (InsightForge)
+    包含多个子问题的检索结果，以及综合分析
+    """"""
+    query: str
+    simulation_requirement: str
+    sub_queries: List[str]
+    
+    # 各维度检索结果
+    semantic_facts: List[str] = field(default_factory=list)  # 语义搜索结果
+    entity_insights: List[Dict[str, Any]] = field(default_factory=list)  # 实体洞察
+    relationship_chains: List[str] = field(default_factory=list)  # 关系链
+    
+    # 统计信息
+    total_facts: int = 0
+    total_entities: int = 0
+    total_relationships: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""query"": self.query,
+            ""simulation_requirement"": self.simulation_requirement,
+            ""sub_queries"": self.sub_queries,
+            ""semantic_facts"": self.semantic_facts,
+            ""entity_insights"": self.entity_insights,
+            ""relationship_chains"": self.relationship_chains,
+            ""total_facts"": self.total_facts,
+            ""total_entities"": self.total_entities,
+            ""total_relationships"": self.total_relationships
+        }
+    
+    def to_text(self) -> str:
+        """"""转换为详细的文本格式，供LLM理解""""""
+        text_parts = [
+            f""## 未来预测深度分析"",
+            f""分析问题: {self.query}"",
+            f""预测场景: {self.simulation_requirement}"",
+            f""\n### 预测数据统计"",
+            f""- 相关预测事实: {self.total_facts}条"",
+            f""- 涉及实体: {self.total_entities}个"",
+            f""- 关系链: {self.total_relationships}条""
+        ]
+        
+        # 子问题
+        if self.sub_queries:
+            text_parts.append(f""\n### 分析的子问题"")
+            for i, sq in enumerate(self.sub_queries, 1):
+                text_parts.append(f""{i}. {sq}"")
+        
+        # 语义搜索结果
+        if self.semantic_facts:
+            text_parts.append(f""\n### 【关键事实】(请在报告中引用这些原文)"")
+            for i, fact in enumerate(self.semantic_facts, 1):
+                text_parts.append(f""{i}. \""{fact}\"""")
+        
+        # 实体洞察
+        if self.entity_insights:
+            text_parts.append(f""\n### 【核心实体】"")
+            for entity in self.entity_insights:
+                text_parts.append(f""- **{entity.get('name', '未知')}** ({entity.get('type', '实体')})"")
+                if entity.get('summary'):
+                    text_parts.append(f""  摘要: \""{entity.get('summary')}\"""")
+                if entity.get('related_facts'):
+                    text_parts.append(f""  相关事实: {len(entity.get('related_facts', []))}条"")
+        
+        # 关系链
+        if self.relationship_chains:
+            text_parts.append(f""\n### 【关系链】"")
+            for chain in self.relationship_chains:
+                text_parts.append(f""- {chain}"")
+        
+        return ""\n"".join(text_parts)
+
+
+",""
+"Class:backend/app/services/zep_tools.py:PanoramaResult:213","PanoramaResult","backend/app/services/zep_tools.py",213,279,true,"
+@dataclass
+class PanoramaResult:
+    """"""
+    广度搜索结果 (Panorama)
+    包含所有相关信息，包括过期内容
+    """"""
+    query: str
+    
+    # 全部节点
+    all_nodes: List[NodeInfo] = field(default_factory=list)
+    # 全部边（包括过期的）
+    all_edges: List[EdgeInfo] = field(default_factory=list)
+    # 当前有效的事实
+    active_facts: List[str] = field(default_factory=list)
+    # 已过期/失效的事实（历史记录）
+    historical_facts: List[str] = field(default_factory=list)
+    
+    # 统计
+    total_nodes: int = 0
+    total_edges: int = 0
+    active_count: int = 0
+    historical_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""query"": self.query,
+            ""all_nodes"": [n.to_dict() for n in self.all_nodes],
+            ""all_edges"": [e.to_dict() for e in self.all_edges],
+            ""active_facts"": self.active_facts,
+            ""historical_facts"": self.historical_facts,
+            ""total_nodes"": self.total_nodes,
+            ""total_edges"": self.total_edges,
+            ""active_count"": self.active_count,
+            ""historical_count"": self.historical_count
+        }
+    
+    def to_text(self) -> str:
+        """"""转换为文本格式（完整版本，不截断）""""""
+        text_parts = [
+            f""## 广度搜索结果（未来全景视图）"",
+            f""查询: {self.query}"",
+            f""\n### 统计信息"",
+            f""- 总节点数: {self.total_nodes}"",
+            f""- 总边数: {self.total_edges}"",
+            f""- 当前有效事实: {self.active_count}条"",
+            f""- 历史/过期事实: {self.historical_count}条""
+        ]
+        
+        # 当前有效的事实（完整输出，不截断）
+        if self.active_facts:
+            text_parts.append(f""\n### 【当前有效事实】(模拟结果原文)"")
+            for i, fact in enumerate(self.active_facts, 1):
+                text_parts.append(f""{i}. \""{fact}\"""")
+        
+        # 历史/过期事实（完整输出，不截断）
+        if self.historical_facts:
+            text_parts.append(f""\n### 【历史/过期事实】(演变过程记录)"")
+            for i, fact in enumerate(self.historical_facts, 1):
+                text_parts.append(f""{i}. \""{fact}\"""")
+        
+        # 关键实体（完整输出，不截断）
+        if self.all_nodes:
+            text_parts.append(f""\n### 【涉及实体】"")
+            for node in self.all_nodes:
+                entity_type = next((l for l in node.labels if l not in [""Entity"", ""Node""]), ""实体"")
+                text_parts.append(f""- **{node.name}** ({entity_type})"")
+        
+        return ""\n"".join(text_parts)
+
+
+",""
+"Class:backend/app/services/zep_tools.py:AgentInterview:283","AgentInterview","backend/app/services/zep_tools.py",283,335,true,"
+@dataclass
+class AgentInterview:
+    """"""单个Agent的采访结果""""""
+    agent_name: str
+    agent_role: str  # 角色类型（如：学生、教师、媒体等）
+    agent_bio: str  # 简介
+    question: str  # 采访问题
+    response: str  # 采访回答
+    key_quotes: List[str] = field(default_factory=list)  # 关键引言
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""agent_name"": self.agent_name,
+            ""agent_role"": self.agent_role,
+            ""agent_bio"": self.agent_bio,
+            ""question"": self.question,
+            ""response"": self.response,
+            ""key_quotes"": self.key_quotes
+        }
+    
+    def to_text(self) -> str:
+        text = f""**{self.agent_name}** ({self.agent_role})\n""
+        # 显示完整的agent_bio，不截断
+        text += f""_简介: {self.agent_bio}_\n\n""
+        text += f""**Q:** {self.question}\n\n""
+        text += f""**A:** {self.response}\n""
+        if self.key_quotes:
+            text += ""\n**关键引言:**\n""
+            for quote in self.key_quotes:
+                # 清理各种引号
+                clean_quote = quote.replace('\u201c', '').replace('\u201d', '').replace('""', '')
+                clean_quote = clean_quote.replace('\u300c', '').replace('\u300d', '')
+                clean_quote = clean_quote.strip()
+                # 去掉开头的标点
+                while clean_quote and clean_quote[0] in '，,；;：:、。！？\n\r\t ':
+                    clean_quote = clean_quote[1:]
+                # 过滤包含问题编号的垃圾内容（问题1-9）
+                skip = False
+                for d in '123456789':
+                    if f'\u95ee\u9898{d}' in clean_quote:
+                        skip = True
+                        break
+                if skip:
+                    continue
+                # 截断过长内容（按句号截断，而非硬截断）
+                if len(clean_quote) > 150:
+                    dot_pos = clean_quote.find('\u3002', 80)
+                    if dot_pos > 0:
+                        clean_quote = clean_quote[:dot_pos + 1]
+                    else:
+                        clean_quote = clean_quote[:147] + ""...""
+                if clean_quote and len(clean_quote) >= 10:
+                    text += f'> ""{clean_quote}""\n'
+        return text
+
+
+",""
+"Class:backend/app/services/zep_tools.py:InterviewResult:339","InterviewResult","backend/app/services/zep_tools.py",339,396,true,"
+@dataclass
+class InterviewResult:
+    """"""
+    采访结果 (Interview)
+    包含多个模拟Agent的采访回答
+    """"""
+    interview_topic: str  # 采访主题
+    interview_questions: List[str]  # 采访问题列表
+    
+    # 采访选择的Agent
+    selected_agents: List[Dict[str, Any]] = field(default_factory=list)
+    # 各Agent的采访回答
+    interviews: List[AgentInterview] = field(default_factory=list)
+    
+    # 选择Agent的理由
+    selection_reasoning: str = """"
+    # 整合后的采访摘要
+    summary: str = """"
+    
+    # 统计
+    total_agents: int = 0
+    interviewed_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""interview_topic"": self.interview_topic,
+            ""interview_questions"": self.interview_questions,
+            ""selected_agents"": self.selected_agents,
+            ""interviews"": [i.to_dict() for i in self.interviews],
+            ""selection_reasoning"": self.selection_reasoning,
+            ""summary"": self.summary,
+            ""total_agents"": self.total_agents,
+            ""interviewed_count"": self.interviewed_count
+        }
+    
+    def to_text(self) -> str:
+        """"""转换为详细的文本格式，供LLM理解和报告引用""""""
+        text_parts = [
+            ""## 深度采访报告"",
+            f""**采访主题:** {self.interview_topic}"",
+            f""**采访人数:** {self.interviewed_count} / {self.total_agents} 位模拟Agent"",
+            ""\n### 采访对象选择理由"",
+            self.selection_reasoning or ""（自动选择）"",
+            ""\n---"",
+            ""\n### 采访实录"",
+        ]
+
+        if self.interviews:
+            for i, interview in enumerate(self.interviews, 1):
+                text_parts.append(f""\n#### 采访 #{i}: {interview.agent_name}"")
+                text_parts.append(interview.to_text())
+                text_parts.append(""\n---"")
+        else:
+            text_parts.append(""（无采访记录）\n\n---"")
+
+        text_parts.append(""\n### 采访摘要与核心观点"")
+        text_parts.append(self.summary or ""（无摘要）"")
+
+        return ""\n"".join(text_parts)
+
+
+",""
+"Class:backend/app/services/zep_tools.py:ZepToolsService:399","ZepToolsService","backend/app/services/zep_tools.py",399,1734,true,"
+
+class ZepToolsService:
+    """"""
+    Zep检索工具服务
+    
+    【核心检索工具 - 优化后】
+    1. insight_forge - 深度洞察检索（最强大，自动生成子问题，多维度检索）
+    2. panorama_search - 广度搜索（获取全貌，包括过期内容）
+    3. quick_search - 简单搜索（快速检索）
+    4. interview_agents - 深度采访（采访模拟Agent，获取多视角观点）
+    
+    【基础工具】
+    - search_graph - 图谱语义搜索
+    - get_all_nodes - 获取图谱所有节点
+    - get_all_edges - 获取图谱所有边（含时间信息）
+    - get_node_detail - 获取节点详细信息
+    - get_node_edges - 获取节点相关的边
+    - get_entities_by_type - 按类型获取实体
+    - get_entity_summary - 获取实体的关系摘要
+    """"""
+    
+    # 重试配置
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2.0
+    
+    def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
+        self.api_key = api_key or Config.ZEP_API_KEY
+        if not self.api_key:
+            raise ValueError(""ZEP_API_KEY 未配置"")
+        
+        self.client = Zep(api_key=self.api_key)
+        # LLM客户端用于InsightForge生成子问题
+        self._llm_client = llm_client
+        logger.info(""ZepToolsService 初始化完成"")
+    
+    @property
+    def llm(self) -> LLMClient:
+        """"""延迟初始化LLM客户端""""""
+        if self._llm_client is None:
+            self._llm_client = LLMClient()
+        return self._llm_client
+    
+    def _call_with_retry(self, func, operation_name: str, max_retries: int = None):
+        """"""带重试机制的API调用""""""
+        max_retries = max_retries or self.MAX_RETRIES
+        last_exception = None
+        delay = self.RETRY_DELAY
+        
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f""Zep {operation_name} 第 {attempt + 1} 次尝试失败: {str(e)[:100]}, ""
+                        f""{delay:.1f}秒后重试...""
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.error(f""Zep {operation_name} 在 {max_retries} 次尝试后仍失败: {str(e)}"")
+        
+        raise last_exception
+    
+    def search_graph(
+        self, 
+        graph_id: str, 
+        query: str, 
+        limit: int = 10,
+        scope: str = ""edges""
+    ) -> SearchResult:
+        """"""
+        图谱语义搜索
+        
+        使用混合搜索（语义+BM25）在图谱中搜索相关信息。
+        如果Zep Cloud的search API不可用，则降级为本地关键词匹配。
+        
+        Args:
+            graph_id: 图谱ID (Standalone Graph)
+            query: 搜索查询
+            limit: 返回结果数量
+            scope: 搜索范围，""edges"" 或 ""nodes""
+            
+        Returns:
+            SearchResult: 搜索结果
+        """"""
+        logger.info(f""图谱搜索: graph_id={graph_id}, query={query[:50]}..."")
+        
+        # 尝试使用Zep Cloud Search API
+        try:
+            search_results = self._call_with_retry(
+                func=lambda: self.client.graph.search(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                    scope=scope,
+                    reranker=""cross_encoder""
+                ),
+                operation_name=f""图谱搜索(graph={graph_id})""
+            )
+            
+            facts = []
+            edges = []
+            nodes = []
+            
+            # 解析边搜索结果
+            if hasattr(search_results, 'edges') and search_results.edges:
+                for edge in search_results.edges:
+                    if hasattr(edge, 'fact') and edge.fact:
+                        facts.append(edge.fact)
+                    edges.append({
+                        ""uuid"": getattr(edge, 'uuid_', None) or getattr(edge, 'uuid', ''),
+                        ""name"": getattr(edge, 'name', ''),
+                        ""fact"": getattr(edge, 'fact', ''),
+                        ""source_node_uuid"": getattr(edge, 'source_node_uuid', ''),
+                        ""target_node_uuid"": getattr(edge, 'target_node_uuid', ''),
+                    })
+            
+            # 解析节点搜索结果
+            if hasattr(search_results, 'nodes') and search_results.nodes:
+                for node in search_results.nodes:
+                    nodes.append({
+                        ""uuid"": getattr(node, 'uuid_', None) or getattr(node, 'uuid', ''),
+                        ""name"": getattr(node, 'name', ''),
+                        ""labels"": getattr(node, 'labels', []),
+                        ""summary"": getattr(node, 'summary', ''),
+                    })
+                    # 节点摘要也算作事实
+                    if hasattr(node, 'summary') and node.summary:
+                        facts.append(f""[{node.name}]: {node.summary}"")
+            
+            logger.info(f""搜索完成: 找到 {len(facts)} 条相关事实"")
+            
+            return SearchResult(
+                facts=facts,
+                edges=edges,
+                nodes=nodes,
+                query=query,
+                total_count=len(facts)
+            )
+            
+        except Exception as e:
+            logger.warning(f""Zep Sear
+... [truncated]",""
+"Class:backend/app/services/zep_graph_memory_updater.py:AgentActivity:24","AgentActivity","backend/app/services/zep_graph_memory_updater.py",24,198,true,"
+@dataclass
+class AgentActivity:
+    """"""Agent活动记录""""""
+    platform: str           # twitter / reddit
+    agent_id: int
+    agent_name: str
+    action_type: str        # CREATE_POST, LIKE_POST, etc.
+    action_args: Dict[str, Any]
+    round_num: int
+    timestamp: str
+    
+    def to_episode_text(self) -> str:
+        """"""
+        将活动转换为可以发送给Zep的文本描述
+        
+        采用自然语言描述格式，让Zep能够从中提取实体和关系
+        不添加模拟相关的前缀，避免误导图谱更新
+        """"""
+        # 根据不同的动作类型生成不同的描述
+        action_descriptions = {
+            ""CREATE_POST"": self._describe_create_post,
+            ""LIKE_POST"": self._describe_like_post,
+            ""DISLIKE_POST"": self._describe_dislike_post,
+            ""REPOST"": self._describe_repost,
+            ""QUOTE_POST"": self._describe_quote_post,
+            ""FOLLOW"": self._describe_follow,
+            ""CREATE_COMMENT"": self._describe_create_comment,
+            ""LIKE_COMMENT"": self._describe_like_comment,
+            ""DISLIKE_COMMENT"": self._describe_dislike_comment,
+            ""SEARCH_POSTS"": self._describe_search,
+            ""SEARCH_USER"": self._describe_search_user,
+            ""MUTE"": self._describe_mute,
+        }
+        
+        describe_func = action_descriptions.get(self.action_type, self._describe_generic)
+        description = describe_func()
+        
+        # 直接返回 ""agent名称: 活动描述"" 格式，不添加模拟前缀
+        return f""{self.agent_name}: {description}""
+    
+    def _describe_create_post(self) -> str:
+        content = self.action_args.get(""content"", """")
+        if content:
+            return f""发布了一条帖子：「{content}」""
+        return ""发布了一条帖子""
+    
+    def _describe_like_post(self) -> str:
+        """"""点赞帖子 - 包含帖子原文和作者信息""""""
+        post_content = self.action_args.get(""post_content"", """")
+        post_author = self.action_args.get(""post_author_name"", """")
+        
+        if post_content and post_author:
+            return f""点赞了{post_author}的帖子：「{post_content}」""
+        elif post_content:
+            return f""点赞了一条帖子：「{post_content}」""
+        elif post_author:
+            return f""点赞了{post_author}的一条帖子""
+        return ""点赞了一条帖子""
+    
+    def _describe_dislike_post(self) -> str:
+        """"""踩帖子 - 包含帖子原文和作者信息""""""
+        post_content = self.action_args.get(""post_content"", """")
+        post_author = self.action_args.get(""post_author_name"", """")
+        
+        if post_content and post_author:
+            return f""踩了{post_author}的帖子：「{post_content}」""
+        elif post_content:
+            return f""踩了一条帖子：「{post_content}」""
+        elif post_author:
+            return f""踩了{post_author}的一条帖子""
+        return ""踩了一条帖子""
+    
+    def _describe_repost(self) -> str:
+        """"""转发帖子 - 包含原帖内容和作者信息""""""
+        original_content = self.action_args.get(""original_content"", """")
+        original_author = self.action_args.get(""original_author_name"", """")
+        
+        if original_content and original_author:
+            return f""转发了{original_author}的帖子：「{original_content}」""
+        elif original_content:
+            return f""转发了一条帖子：「{original_content}」""
+        elif original_author:
+            return f""转发了{original_author}的一条帖子""
+        return ""转发了一条帖子""
+    
+    def _describe_quote_post(self) -> str:
+        """"""引用帖子 - 包含原帖内容、作者信息和引用评论""""""
+        original_content = self.action_args.get(""original_content"", """")
+        original_author = self.action_args.get(""original_author_name"", """")
+        quote_content = self.action_args.get(""quote_content"", """") or self.action_args.get(""content"", """")
+        
+        base = """"
+        if original_content and original_author:
+            base = f""引用了{original_author}的帖子「{original_content}」""
+        elif original_content:
+            base = f""引用了一条帖子「{original_content}」""
+        elif original_author:
+            base = f""引用了{original_author}的一条帖子""
+        else:
+            base = ""引用了一条帖子""
+        
+        if quote_content:
+            base += f""，并评论道：「{quote_content}」""
+        return base
+    
+    def _describe_follow(self) -> str:
+        """"""关注用户 - 包含被关注用户的名称""""""
+        target_user_name = self.action_args.get(""target_user_name"", """")
+        
+        if target_user_name:
+            return f""关注了用户「{target_user_name}」""
+        return ""关注了一个用户""
+    
+    def _describe_create_comment(self) -> str:
+        """"""发表评论 - 包含评论内容和所评论的帖子信息""""""
+        content = self.action_args.get(""content"", """")
+        post_content = self.action_args.get(""post_content"", """")
+        post_author = self.action_args.get(""post_author_name"", """")
+        
+        if content:
+            if post_content and post_author:
+                return f""在{post_author}的帖子「{post_content}」下评论道：「{content}」""
+            elif post_content:
+                return f""在帖子「{post_content}」下评论道：「{content}」""
+            elif post_author:
+                return f""在{post_author}的帖子下评论道：「{content}」""
+            return f""评论道：「{content}」""
+        return ""发表了评论""
+    
+    def _describe_like_comment(self) -> str:
+        """"""点赞评论 - 包含评论内容和作者信息""""""
+... [truncated]",""
+"Class:backend/app/services/zep_graph_memory_updater.py:ZepGraphMemoryUpdater:201","ZepGraphMemoryUpdater","backend/app/services/zep_graph_memory_updater.py",201,470,true,"
+
+class ZepGraphMemoryUpdater:
+    """"""
+    Zep图谱记忆更新器
+    
+    监控模拟的actions日志文件，将新的agent活动实时更新到Zep图谱中。
+    按平台分组，每累积BATCH_SIZE条活动后批量发送到Zep。
+    
+    所有有意义的行为都会被更新到Zep，action_args中会包含完整的上下文信息：
+    - 点赞/踩的帖子原文
+    - 转发/引用的帖子原文
+    - 关注/屏蔽的用户名
+    - 点赞/踩的评论原文
+    """"""
+    
+    # 批量发送大小（每个平台累积多少条后发送）
+    BATCH_SIZE = 5
+    
+    # 平台名称映射（用于控制台显示）
+    PLATFORM_DISPLAY_NAMES = {
+        'twitter': '世界1',
+        'reddit': '世界2',
+    }
+    
+    # 发送间隔（秒），避免请求过快
+    SEND_INTERVAL = 0.5
+    
+    # 重试配置
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2  # 秒
+    
+    def __init__(self, graph_id: str, api_key: Optional[str] = None):
+        """"""
+        初始化更新器
+        
+        Args:
+            graph_id: Zep图谱ID
+            api_key: Zep API Key（可选，默认从配置读取）
+        """"""
+        self.graph_id = graph_id
+        self.api_key = api_key or Config.ZEP_API_KEY
+        
+        if not self.api_key:
+            raise ValueError(""ZEP_API_KEY未配置"")
+        
+        self.client = Zep(api_key=self.api_key)
+        
+        # 活动队列
+        self._activity_queue: Queue = Queue()
+        
+        # 按平台分组的活动缓冲区（每个平台各自累积到BATCH_SIZE后批量发送）
+        self._platform_buffers: Dict[str, List[AgentActivity]] = {
+            'twitter': [],
+            'reddit': [],
+        }
+        self._buffer_lock = threading.Lock()
+        
+        # 控制标志
+        self._running = False
+        self._worker_thread: Optional[threading.Thread] = None
+        
+        # 统计
+        self._total_activities = 0  # 实际添加到队列的活动数
+        self._total_sent = 0        # 成功发送到Zep的批次数
+        self._total_items_sent = 0  # 成功发送到Zep的活动条数
+        self._failed_count = 0      # 发送失败的批次数
+        self._skipped_count = 0     # 被过滤跳过的活动数（DO_NOTHING）
+        
+        logger.info(f""ZepGraphMemoryUpdater 初始化完成: graph_id={graph_id}, batch_size={self.BATCH_SIZE}"")
+    
+    def _get_platform_display_name(self, platform: str) -> str:
+        """"""获取平台的显示名称""""""
+        return get_platform_name(platform.lower())
+    
+    def start(self):
+        """"""启动后台工作线程""""""
+        if self._running:
+            return
+        
+        self._running = True
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name=f""ZepMemoryUpdater-{self.graph_id[:8]}""
+        )
+        self._worker_thread.start()
+        logger.info(f""ZepGraphMemoryUpdater 已启动: graph_id={self.graph_id}"")
+    
+    def stop(self):
+        """"""停止后台工作线程""""""
+        self._running = False
+        
+        # 发送剩余的活动
+        self._flush_remaining()
+        
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=10)
+        
+        logger.info(f""ZepGraphMemoryUpdater 已停止: graph_id={self.graph_id}, ""
+                   f""total_activities={self._total_activities}, ""
+                   f""batches_sent={self._total_sent}, ""
+                   f""items_sent={self._total_items_sent}, ""
+                   f""failed={self._failed_count}, ""
+                   f""skipped={self._skipped_count}"")
+    
+    def add_activity(self, activity: AgentActivity):
+        """"""
+        添加一个agent活动到队列
+        
+        所有有意义的行为都会被添加到队列，包括：
+        - CREATE_POST（发帖）
+        - CREATE_COMMENT（评论）
+        - QUOTE_POST（引用帖子）
+        - SEARCH_POSTS（搜索帖子）
+        - SEARCH_USER（搜索用户）
+        - LIKE_POST/DISLIKE_POST（点赞/踩帖子）
+        - REPOST（转发）
+        - FOLLOW（关注）
+        - MUTE（屏蔽）
+        - LIKE_COMMENT/DISLIKE_COMMENT（点赞/踩评论）
+        
+        action_args中会包含完整的上下文信息（如帖子原文、用户名等）。
+        
+        Args:
+            activity: Agent活动记录
+        """"""
+        # 跳过DO_NOTHING类型的活动
+        if activity.action_type == ""DO_NOTHING"":
+            self._skipped_count += 1
+            return
+        
+        self._activity_queue.put(activity)
+        self._total_activities += 1
+        logger.debug(f""添加活动到Zep队列: {activity.agent_name} - {activity.action_type}"")
+    
+    def add_activity_from_dict(self, data: Dict[str, Any], platform: str):
+        """"""
+        从字典数据添加活动
+        
+        Args:
+            data: 从actions.jsonl解析的字典数据
+            platform: 平台名称 (twitter/reddit)
+        """"""
+        # 跳过事件类型的条目
+        if ""event_type"" in data:
+            return
+        
+        activity = AgentActivity(
+            platform=platform,
+            agent_id=data.get(""agent_id"", 0),
+            agent_name=data.get(""agent_name"", """"),
+            action_type=data.get(""action_type"", """"),
+            action_args=data.get(""action_args"", {}),
+            round_num=data.get(""round"", 0),
+            timestamp=data.get(""timestamp"", datetime.now().isoformat()),
+        )
+        
+        self.add_activity(activity)
+    
+    def _worker_loop(self):
+        """"""后台工作循环 - 按平台批量发送活动到Zep""""""
+        while self._running or not self._activity_queue.empty():
+            try:
+                # 尝试从队列获取活动（超时1秒）
+                try:
+                    activity = self.
+... [truncated]",""
+"Class:backend/app/services/zep_graph_memory_updater.py:ZepGraphMemoryManager:473","ZepGraphMemoryManager","backend/app/services/zep_graph_memory_updater.py",473,548,true,"
+
+class ZepGraphMemoryManager:
+    """"""
+    管理多个模拟的Zep图谱记忆更新器
+    
+    每个模拟可以有自己的更新器实例
+    """"""
+    
+    _updaters: Dict[str, ZepGraphMemoryUpdater] = {}
+    _lock = threading.Lock()
+    
+    @classmethod
+    def create_updater(cls, simulation_id: str, graph_id: str) -> ZepGraphMemoryUpdater:
+        """"""
+        为模拟创建图谱记忆更新器
+        
+        Args:
+            simulation_id: 模拟ID
+            graph_id: Zep图谱ID
+            
+        Returns:
+            ZepGraphMemoryUpdater实例
+        """"""
+        with cls._lock:
+            # 如果已存在，先停止旧的
+            if simulation_id in cls._updaters:
+                cls._updaters[simulation_id].stop()
+            
+            updater = ZepGraphMemoryUpdater(graph_id)
+            updater.start()
+            cls._updaters[simulation_id] = updater
+            
+            logger.info(f""创建图谱记忆更新器: simulation_id={simulation_id}, graph_id={graph_id}"")
+            return updater
+    
+    @classmethod
+    def get_updater(cls, simulation_id: str) -> Optional[ZepGraphMemoryUpdater]:
+        """"""获取模拟的更新器""""""
+        return cls._updaters.get(simulation_id)
+    
+    @classmethod
+    def stop_updater(cls, simulation_id: str):
+        """"""停止并移除模拟的更新器""""""
+        with cls._lock:
+            if simulation_id in cls._updaters:
+                cls._updaters[simulation_id].stop()
+                del cls._updaters[simulation_id]
+                logger.info(f""已停止图谱记忆更新器: simulation_id={simulation_id}"")
+    
+    # 防止 stop_all 重复调用的标志
+    _stop_all_done = False
+    
+    @classmethod
+    def stop_all(cls):
+        """"""停止所有更新器""""""
+        # 防止重复调用
+        if cls._stop_all_done:
+            return
+        cls._stop_all_done = True
+        
+        with cls._lock:
+            if cls._updaters:
+                for simulation_id, updater in list(cls._updaters.items()):
+                    try:
+                        updater.stop()
+                    except Exception as e:
+                        logger.error(f""停止更新器失败: simulation_id={simulation_id}, error={e}"")
+                cls._updaters.clear()
+            logger.info(""已停止所有图谱记忆更新器"")
+    
+    @classmethod
+    def get_all_stats(cls) -> Dict[str, Dict[str, Any]]:
+        """"""获取所有更新器的统计信息""""""
+        return {
+            sim_id: updater.get_stats() 
+            for sim_id, updater in cls._updaters.items()
+        }
+",""
+"Class:backend/app/services/zep_entity_reader.py:EntityNode:22","EntityNode","backend/app/services/zep_entity_reader.py",22,50,true,"
+@dataclass
+class EntityNode:
+    """"""实体节点数据结构""""""
+    uuid: str
+    name: str
+    labels: List[str]
+    summary: str
+    attributes: Dict[str, Any]
+    # 相关的边信息
+    related_edges: List[Dict[str, Any]] = field(default_factory=list)
+    # 相关的其他节点信息
+    related_nodes: List[Dict[str, Any]] = field(default_factory=list)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""uuid"": self.uuid,
+            ""name"": self.name,
+            ""labels"": self.labels,
+            ""summary"": self.summary,
+            ""attributes"": self.attributes,
+            ""related_edges"": self.related_edges,
+            ""related_nodes"": self.related_nodes,
+        }
+    
+    def get_entity_type(self) -> Optional[str]:
+        """"""获取实体类型（排除默认的Entity标签）""""""
+        for label in self.labels:
+            if label not in [""Entity"", ""Node""]:
+                return label
+        return None
+
+
+",""
+"Class:backend/app/services/zep_entity_reader.py:FilteredEntities:54","FilteredEntities","backend/app/services/zep_entity_reader.py",54,67,true,"
+@dataclass
+class FilteredEntities:
+    """"""过滤后的实体集合""""""
+    entities: List[EntityNode]
+    entity_types: Set[str]
+    total_count: int
+    filtered_count: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""entities"": [e.to_dict() for e in self.entities],
+            ""entity_types"": list(self.entity_types),
+            ""total_count"": self.total_count,
+            ""filtered_count"": self.filtered_count,
+        }
+
+
+",""
+"Class:backend/app/services/zep_entity_reader.py:ZepEntityReader:70","ZepEntityReader","backend/app/services/zep_entity_reader.py",70,434,true,"
+
+class ZepEntityReader:
+    """"""
+    Zep实体读取与过滤服务
+    
+    主要功能：
+    1. 从Zep图谱读取所有节点
+    2. 筛选出符合预定义实体类型的节点（Labels不只是Entity的节点）
+    3. 获取每个实体的相关边和关联节点信息
+    """"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or Config.ZEP_API_KEY
+        if not self.api_key:
+            raise ValueError(""ZEP_API_KEY 未配置"")
+        
+        self.client = Zep(api_key=self.api_key)
+    
+    def _call_with_retry(
+        self, 
+        func: Callable[[], T], 
+        operation_name: str,
+        max_retries: int = 3,
+        initial_delay: float = 2.0
+    ) -> T:
+        """"""
+        带重试机制的Zep API调用
+        
+        Args:
+            func: 要执行的函数（无参数的lambda或callable）
+            operation_name: 操作名称，用于日志
+            max_retries: 最大重试次数（默认3次，即最多尝试3次）
+            initial_delay: 初始延迟秒数
+            
+        Returns:
+            API调用结果
+        """"""
+        last_exception = None
+        delay = initial_delay
+        
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f""Zep {operation_name} 第 {attempt + 1} 次尝试失败: {str(e)[:100]}, ""
+                        f""{delay:.1f}秒后重试...""
+                    )
+                    time.sleep(delay)
+                    delay *= 2  # 指数退避
+                else:
+                    logger.error(f""Zep {operation_name} 在 {max_retries} 次尝试后仍失败: {str(e)}"")
+        
+        raise last_exception
+    
+    def get_all_nodes(self, graph_id: str) -> List[Dict[str, Any]]:
+        """"""
+        获取图谱的所有节点（分页获取）
+
+        Args:
+            graph_id: 图谱ID
+
+        Returns:
+            节点列表
+        """"""
+        logger.info(f""获取图谱 {graph_id} 的所有节点..."")
+
+        nodes = fetch_all_nodes(self.client, graph_id)
+
+        nodes_data = []
+        for node in nodes:
+            nodes_data.append({
+                ""uuid"": getattr(node, 'uuid_', None) or getattr(node, 'uuid', ''),
+                ""name"": node.name or """",
+                ""labels"": node.labels or [],
+                ""summary"": node.summary or """",
+                ""attributes"": node.attributes or {},
+            })
+
+        logger.info(f""共获取 {len(nodes_data)} 个节点"")
+        return nodes_data
+
+    def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
+        """"""
+        获取图谱的所有边（分页获取）
+
+        Args:
+            graph_id: 图谱ID
+
+        Returns:
+            边列表
+        """"""
+        logger.info(f""获取图谱 {graph_id} 的所有边..."")
+
+        edges = fetch_all_edges(self.client, graph_id)
+
+        edges_data = []
+        for edge in edges:
+            edges_data.append({
+                ""uuid"": getattr(edge, 'uuid_', None) or getattr(edge, 'uuid', ''),
+                ""name"": edge.name or """",
+                ""fact"": edge.fact or """",
+                ""source_node_uuid"": edge.source_node_uuid,
+                ""target_node_uuid"": edge.target_node_uuid,
+                ""attributes"": edge.attributes or {},
+            })
+
+        logger.info(f""共获取 {len(edges_data)} 条边"")
+        return edges_data
+    
+    def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
+        """"""
+        获取指定节点的所有相关边（带重试机制）
+        
+        Args:
+            node_uuid: 节点UUID
+            
+        Returns:
+            边列表
+        """"""
+        try:
+            # 使用重试机制调用Zep API
+            edges = self._call_with_retry(
+                func=lambda: self.client.graph.node.get_entity_edges(node_uuid=node_uuid),
+                operation_name=f""获取节点边(node={node_uuid[:8]}...)""
+            )
+            
+            edges_data = []
+            for edge in edges:
+                edges_data.append({
+                    ""uuid"": getattr(edge, 'uuid_', None) or getattr(edge, 'uuid', ''),
+                    ""name"": edge.name or """",
+                    ""fact"": edge.fact or """",
+                    ""source_node_uuid"": edge.source_node_uuid,
+                    ""target_node_uuid"": edge.target_node_uuid,
+                    ""attributes"": edge.attributes or {},
+                })
+            
+            return edges_data
+        except Exception as e:
+            logger.warning(f""获取节点 {node_uuid} 的边失败: {str(e)}"")
+            return []
+    
+    def filter_defined_entities(
+        self, 
+        graph_id: str,
+        defined_entity_types: Optional[List[str]] = None,
+        enrich_with_edges: bool = True
+    ) -> FilteredEntities:
+        """"""
+        筛选出符合预定义实体类型的节点
+        
+        筛选逻辑：
+        - 如果节点的Labels只有一个""Entity""，说明这个实体不符合我们预定义的类型，跳过
+        - 如果节点的Labels包含除""Entity""和""Node""之外的标签，说明符合预定义类型，保留
+        
+        Args:
+            graph_id: 图谱ID
+            defined_entity_types: 预定义的实体类型列表（可选，如果提供则只保留这些类型）
+            enrich_with_edges: 是否获取每个实体的相关边信息
+            
+        Returns:
+            Filtere
+... [truncated]",""
+"Class:backend/app/services/text_processor.py:TextProcessor:8","TextProcessor","backend/app/services/text_processor.py",8,69,true,"
+
+class TextProcessor:
+    """"""文本处理器""""""
+    
+    @staticmethod
+    def extract_from_files(file_paths: List[str]) -> str:
+        """"""从多个文件提取文本""""""
+        return FileParser.extract_from_multiple(file_paths)
+    
+    @staticmethod
+    def split_text(
+        text: str,
+        chunk_size: int = 500,
+        overlap: int = 50
+    ) -> List[str]:
+        """"""
+        分割文本
+        
+        Args:
+            text: 原始文本
+            chunk_size: 块大小
+            overlap: 重叠大小
+            
+        Returns:
+            文本块列表
+        """"""
+        return split_text_into_chunks(text, chunk_size, overlap)
+    
+    @staticmethod
+    def preprocess_text(text: str) -> str:
+        """"""
+        预处理文本
+        - 移除多余空白
+        - 标准化换行
+        
+        Args:
+            text: 原始文本
+            
+        Returns:
+            处理后的文本
+        """"""
+        import re
+        
+        # 标准化换行
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # 移除连续空行（保留最多两个换行）
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # 移除行首行尾空白
+        lines = [line.strip() for line in text.split('\n')]
+        text = '\n'.join(lines)
+        
+        return text.strip()
+    
+    @staticmethod
+    def get_text_stats(text: str) -> dict:
+        """"""获取文本统计信息""""""
+        return {
+            ""total_chars"": len(text),
+            ""total_lines"": text.count('\n') + 1,
+            ""total_words"": len(text.split()),
+        }
+
+",""
+"Class:backend/app/services/simulation_runner.py:RunnerStatus:34","RunnerStatus","backend/app/services/simulation_runner.py",34,43,true,"
+
+class RunnerStatus(str, Enum):
+    """"""运行器状态""""""
+    IDLE = ""idle""
+    STARTING = ""starting""
+    RUNNING = ""running""
+    PAUSED = ""paused""
+    STOPPING = ""stopping""
+    STOPPED = ""stopped""
+    COMPLETED = ""completed""
+    FAILED = ""failed""
+
+
+",""
+"Class:backend/app/services/simulation_runner.py:AgentAction:47","AgentAction","backend/app/services/simulation_runner.py",47,70,true,"
+@dataclass
+class AgentAction:
+    """"""Agent动作记录""""""
+    round_num: int
+    timestamp: str
+    platform: str  # twitter / reddit
+    agent_id: int
+    agent_name: str
+    action_type: str  # CREATE_POST, LIKE_POST, etc.
+    action_args: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[str] = None
+    success: bool = True
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""round_num"": self.round_num,
+            ""timestamp"": self.timestamp,
+            ""platform"": self.platform,
+            ""agent_id"": self.agent_id,
+            ""agent_name"": self.agent_name,
+            ""action_type"": self.action_type,
+            ""action_args"": self.action_args,
+            ""result"": self.result,
+            ""success"": self.success,
+        }
+
+
+",""
+"Class:backend/app/services/simulation_runner.py:RoundSummary:74","RoundSummary","backend/app/services/simulation_runner.py",74,96,true,"
+@dataclass
+class RoundSummary:
+    """"""每轮摘要""""""
+    round_num: int
+    start_time: str
+    end_time: Optional[str] = None
+    simulated_hour: int = 0
+    twitter_actions: int = 0
+    reddit_actions: int = 0
+    active_agents: List[int] = field(default_factory=list)
+    actions: List[AgentAction] = field(default_factory=list)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""round_num"": self.round_num,
+            ""start_time"": self.start_time,
+            ""end_time"": self.end_time,
+            ""simulated_hour"": self.simulated_hour,
+            ""twitter_actions"": self.twitter_actions,
+            ""reddit_actions"": self.reddit_actions,
+            ""active_agents"": self.active_agents,
+            ""actions_count"": len(self.actions),
+            ""actions"": [a.to_dict() for a in self.actions],
+        }
+
+
+",""
+"Class:backend/app/services/simulation_runner.py:SimulationRunState:100","SimulationRunState","backend/app/services/simulation_runner.py",100,191,true,"
+@dataclass
+class SimulationRunState:
+    """"""模拟运行状态（实时）""""""
+    simulation_id: str
+    runner_status: RunnerStatus = RunnerStatus.IDLE
+    
+    # 进度信息
+    current_round: int = 0
+    total_rounds: int = 0
+    simulated_hours: int = 0
+    total_simulation_hours: int = 0
+    
+    # 各平台独立轮次和模拟时间（用于双平台并行显示）
+    twitter_current_round: int = 0
+    reddit_current_round: int = 0
+    twitter_simulated_hours: int = 0
+    reddit_simulated_hours: int = 0
+    
+    # 平台状态
+    twitter_running: bool = False
+    reddit_running: bool = False
+    twitter_actions_count: int = 0
+    reddit_actions_count: int = 0
+    
+    # 平台完成状态（通过检测 actions.jsonl 中的 simulation_end 事件）
+    twitter_completed: bool = False
+    reddit_completed: bool = False
+    
+    # 每轮摘要
+    rounds: List[RoundSummary] = field(default_factory=list)
+    
+    # 最近动作（用于前端实时展示）
+    recent_actions: List[AgentAction] = field(default_factory=list)
+    max_recent_actions: int = 50
+    
+    # 时间戳
+    started_at: Optional[str] = None
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    completed_at: Optional[str] = None
+    
+    # 错误信息
+    error: Optional[str] = None
+    
+    # 进程ID（用于停止）
+    process_pid: Optional[int] = None
+    
+    def add_action(self, action: AgentAction):
+        """"""添加动作到最近动作列表""""""
+        self.recent_actions.insert(0, action)
+        if len(self.recent_actions) > self.max_recent_actions:
+            self.recent_actions = self.recent_actions[:self.max_recent_actions]
+        
+        if action.platform == ""twitter"":
+            self.twitter_actions_count += 1
+        else:
+            self.reddit_actions_count += 1
+        
+        self.updated_at = datetime.now().isoformat()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""simulation_id"": self.simulation_id,
+            ""runner_status"": self.runner_status.value,
+            ""current_round"": self.current_round,
+            ""total_rounds"": self.total_rounds,
+            ""simulated_hours"": self.simulated_hours,
+            ""total_simulation_hours"": self.total_simulation_hours,
+            ""progress_percent"": round(self.current_round / max(self.total_rounds, 1) * 100, 1),
+            # 各平台独立轮次和时间
+            ""twitter_current_round"": self.twitter_current_round,
+            ""reddit_current_round"": self.reddit_current_round,
+            ""twitter_simulated_hours"": self.twitter_simulated_hours,
+            ""reddit_simulated_hours"": self.reddit_simulated_hours,
+            ""twitter_running"": self.twitter_running,
+            ""reddit_running"": self.reddit_running,
+            ""twitter_completed"": self.twitter_completed,
+            ""reddit_completed"": self.reddit_completed,
+            ""twitter_actions_count"": self.twitter_actions_count,
+            ""reddit_actions_count"": self.reddit_actions_count,
+            ""total_actions_count"": self.twitter_actions_count + self.reddit_actions_count,
+            ""started_at"": self.started_at,
+            ""updated_at"": self.updated_at,
+            ""completed_at"": self.completed_at,
+            ""error"": self.error,
+            ""process_pid"": self.process_pid,
+        }
+    
+    def to_detail_dict(self) -> Dict[str, Any]:
+        """"""包含最近动作的详细信息""""""
+        result = self.to_dict()
+        result[""recent_actions""] = [a.to_dict() for a in self.recent_actions]
+        result[""rounds_count""] = len(self.rounds)
+        return result
+
+
+",""
+"Class:backend/app/services/simulation_runner.py:SimulationRunner:194","SimulationRunner","backend/app/services/simulation_runner.py",194,1761,true,"
+
+class SimulationRunner:
+    """"""
+    模拟运行器
+    
+    负责：
+    1. 在后台进程中运行OASIS模拟
+    2. 解析运行日志，记录每个Agent的动作
+    3. 提供实时状态查询接口
+    4. 支持暂停/停止/恢复操作
+    """"""
+    
+    # 运行状态存储目录
+    RUN_STATE_DIR = os.path.join(
+        os.path.dirname(__file__),
+        '../../uploads/simulations'
+    )
+    
+    # 脚本目录
+    SCRIPTS_DIR = os.path.join(
+        os.path.dirname(__file__),
+        '../../scripts'
+    )
+    
+    # 内存中的运行状态
+    _run_states: Dict[str, SimulationRunState] = {}
+    _processes: Dict[str, subprocess.Popen] = {}
+    _action_queues: Dict[str, Queue] = {}
+    _monitor_threads: Dict[str, threading.Thread] = {}
+    _stdout_files: Dict[str, Any] = {}  # 存储 stdout 文件句柄
+    _stderr_files: Dict[str, Any] = {}  # 存储 stderr 文件句柄
+    
+    # 图谱记忆更新配置
+    _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
+    
+    @classmethod
+    def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
+        """"""获取运行状态""""""
+        if simulation_id in cls._run_states:
+            return cls._run_states[simulation_id]
+        
+        # 尝试从文件加载
+        state = cls._load_run_state(simulation_id)
+        if state:
+            cls._run_states[simulation_id] = state
+        return state
+    
+    @classmethod
+    def _load_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
+        """"""从文件加载运行状态""""""
+        state_file = os.path.join(cls.RUN_STATE_DIR, simulation_id, ""run_state.json"")
+        if not os.path.exists(state_file):
+            return None
+        
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            state = SimulationRunState(
+                simulation_id=simulation_id,
+                runner_status=RunnerStatus(data.get(""runner_status"", ""idle"")),
+                current_round=data.get(""current_round"", 0),
+                total_rounds=data.get(""total_rounds"", 0),
+                simulated_hours=data.get(""simulated_hours"", 0),
+                total_simulation_hours=data.get(""total_simulation_hours"", 0),
+                # 各平台独立轮次和时间
+                twitter_current_round=data.get(""twitter_current_round"", 0),
+                reddit_current_round=data.get(""reddit_current_round"", 0),
+                twitter_simulated_hours=data.get(""twitter_simulated_hours"", 0),
+                reddit_simulated_hours=data.get(""reddit_simulated_hours"", 0),
+                twitter_running=data.get(""twitter_running"", False),
+                reddit_running=data.get(""reddit_running"", False),
+                twitter_completed=data.get(""twitter_completed"", False),
+                reddit_completed=data.get(""reddit_completed"", False),
+                twitter_actions_count=data.get(""twitter_actions_count"", 0),
+                reddit_actions_count=data.get(""reddit_actions_count"", 0),
+                started_at=data.get(""started_at""),
+                updated_at=data.get(""updated_at"", datetime.now().isoformat()),
+                completed_at=data.get(""completed_at""),
+                error=data.get(""error""),
+                process_pid=data.get(""process_pid""),
+            )
+            
+            # 加载最近动作
+            actions_data = data.get(""recent_actions"", [])
+            for a in actions_data:
+                state.recent_actions.append(AgentAction(
+                    round_num=a.get(""round_num"", 0),
+                    timestamp=a.get(""timestamp"", """"),
+                    platform=a.get(""platform"", """"),
+                    agent_id=a.get(""agent_id"", 0),
+                    agent_name=a.get(""agent_name"", """"),
+                    action_type=a.get(""action_type"", """"),
+                    action_args=a.get(""action_args"", {}),
+                    result=a.get(""result""),
+                    success=a.get(""success"", True),
+                ))
+            
+            return state
+        except Exception as e:
+            logger.error(f""加载运行状态失败: {str(e)}"")
+            return None
+    
+    @classmethod
+    def _save_run_state(cls, state: SimulationRunState):
+        """"""保存运行状态到文件""""""
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
+        os.makedirs(sim_dir, exist_ok=True)
+        state_file = os.path.join(sim_dir, ""run_state.json"")
+        
+        data = state.to_detail_dict()
+        
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        cls._run_states[state.simulation_id] = state
+    
+    @classmethod
+    def start_simulation(
+        cls,
+        simulation_id: str,
+        platform: str = ""parallel"",  # twitter / reddit / parallel
+        max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
+        enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
+        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+    ) -> SimulationRunState:
+        """"""
+        启动模拟
+        
+        Args:
+            simul
+... [truncated]",""
+"Class:backend/app/services/simulation_manager.py:SimulationStatus:23","SimulationStatus","backend/app/services/simulation_manager.py",23,32,true,"
+
+class SimulationStatus(str, Enum):
+    """"""模拟状态""""""
+    CREATED = ""created""
+    PREPARING = ""preparing""
+    READY = ""ready""
+    RUNNING = ""running""
+    PAUSED = ""paused""
+    STOPPED = ""stopped""      # 模拟被手动停止
+    COMPLETED = ""completed""  # 模拟自然完成
+    FAILED = ""failed""
+
+
+",""
+"Class:backend/app/services/simulation_manager.py:PlatformType:35","PlatformType","backend/app/services/simulation_manager.py",35,38,true,"
+
+class PlatformType(str, Enum):
+    """"""平台类型""""""
+    TWITTER = ""twitter""
+    REDDIT = ""reddit""
+
+
+",""
+"Class:backend/app/services/simulation_manager.py:SimulationState:42","SimulationState","backend/app/services/simulation_manager.py",42,110,true,"
+@dataclass
+class SimulationState:
+    """"""模拟状态""""""
+    simulation_id: str
+    project_id: str
+    graph_id: str
+    
+    # 平台启用状态
+    enable_twitter: bool = True
+    enable_reddit: bool = True
+    
+    # 状态
+    status: SimulationStatus = SimulationStatus.CREATED
+    
+    # 准备阶段数据
+    entities_count: int = 0
+    profiles_count: int = 0
+    entity_types: List[str] = field(default_factory=list)
+    
+    # 配置生成信息
+    config_generated: bool = False
+    config_reasoning: str = """"
+    
+    # 运行时数据
+    current_round: int = 0
+    twitter_status: str = ""not_started""
+    reddit_status: str = ""not_started""
+    
+    # 时间戳
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    # 错误信息
+    error: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """"""完整状态字典（内部使用）""""""
+        return {
+            ""simulation_id"": self.simulation_id,
+            ""project_id"": self.project_id,
+            ""graph_id"": self.graph_id,
+            ""enable_twitter"": self.enable_twitter,
+            ""enable_reddit"": self.enable_reddit,
+            ""status"": self.status.value,
+            ""entities_count"": self.entities_count,
+            ""profiles_count"": self.profiles_count,
+            ""entity_types"": self.entity_types,
+            ""config_generated"": self.config_generated,
+            ""config_reasoning"": self.config_reasoning,
+            ""current_round"": self.current_round,
+            ""twitter_status"": self.twitter_status,
+            ""reddit_status"": self.reddit_status,
+            ""created_at"": self.created_at,
+            ""updated_at"": self.updated_at,
+            ""error"": self.error,
+        }
+    
+    def to_simple_dict(self) -> Dict[str, Any]:
+        """"""简化状态字典（API返回使用）""""""
+        return {
+            ""simulation_id"": self.simulation_id,
+            ""project_id"": self.project_id,
+            ""graph_id"": self.graph_id,
+            ""status"": self.status.value,
+            ""entities_count"": self.entities_count,
+            ""profiles_count"": self.profiles_count,
+            ""entity_types"": self.entity_types,
+            ""config_generated"": self.config_generated,
+            ""error"": self.error,
+        }
+
+
+",""
+"Class:backend/app/services/simulation_manager.py:SimulationManager:113","SimulationManager","backend/app/services/simulation_manager.py",113,527,true,"
+
+class SimulationManager:
+    """"""
+    模拟管理器
+    
+    核心功能：
+    1. 从Zep图谱读取实体并过滤
+    2. 生成OASIS Agent Profile
+    3. 使用LLM智能生成模拟配置参数
+    4. 准备预设脚本所需的所有文件
+    """"""
+    
+    # 模拟数据存储目录
+    SIMULATION_DATA_DIR = os.path.join(
+        os.path.dirname(__file__), 
+        '../../uploads/simulations'
+    )
+    
+    def __init__(self):
+        # 确保目录存在
+        os.makedirs(self.SIMULATION_DATA_DIR, exist_ok=True)
+        
+        # 内存中的模拟状态缓存
+        self._simulations: Dict[str, SimulationState] = {}
+    
+    def _get_simulation_dir(self, simulation_id: str) -> str:
+        """"""获取模拟数据目录""""""
+        sim_dir = os.path.join(self.SIMULATION_DATA_DIR, simulation_id)
+        os.makedirs(sim_dir, exist_ok=True)
+        return sim_dir
+    
+    def _save_simulation_state(self, state: SimulationState):
+        """"""保存模拟状态到文件""""""
+        sim_dir = self._get_simulation_dir(state.simulation_id)
+        state_file = os.path.join(sim_dir, ""state.json"")
+        
+        state.updated_at = datetime.now().isoformat()
+        
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
+        
+        self._simulations[state.simulation_id] = state
+    
+    def _load_simulation_state(self, simulation_id: str) -> Optional[SimulationState]:
+        """"""从文件加载模拟状态""""""
+        if simulation_id in self._simulations:
+            return self._simulations[simulation_id]
+        
+        sim_dir = self._get_simulation_dir(simulation_id)
+        state_file = os.path.join(sim_dir, ""state.json"")
+        
+        if not os.path.exists(state_file):
+            return None
+        
+        with open(state_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        state = SimulationState(
+            simulation_id=simulation_id,
+            project_id=data.get(""project_id"", """"),
+            graph_id=data.get(""graph_id"", """"),
+            enable_twitter=data.get(""enable_twitter"", True),
+            enable_reddit=data.get(""enable_reddit"", True),
+            status=SimulationStatus(data.get(""status"", ""created"")),
+            entities_count=data.get(""entities_count"", 0),
+            profiles_count=data.get(""profiles_count"", 0),
+            entity_types=data.get(""entity_types"", []),
+            config_generated=data.get(""config_generated"", False),
+            config_reasoning=data.get(""config_reasoning"", """"),
+            current_round=data.get(""current_round"", 0),
+            twitter_status=data.get(""twitter_status"", ""not_started""),
+            reddit_status=data.get(""reddit_status"", ""not_started""),
+            created_at=data.get(""created_at"", datetime.now().isoformat()),
+            updated_at=data.get(""updated_at"", datetime.now().isoformat()),
+            error=data.get(""error""),
+        )
+        
+        self._simulations[simulation_id] = state
+        return state
+    
+    def create_simulation(
+        self,
+        project_id: str,
+        graph_id: str,
+        enable_twitter: bool = True,
+        enable_reddit: bool = True,
+    ) -> SimulationState:
+        """"""
+        创建新的模拟
+        
+        Args:
+            project_id: 项目ID
+            graph_id: Zep图谱ID
+            enable_twitter: 是否启用Twitter模拟
+            enable_reddit: 是否启用Reddit模拟
+            
+        Returns:
+            SimulationState
+        """"""
+        import uuid
+        simulation_id = f""sim_{uuid.uuid4().hex[:12]}""
+        
+        state = SimulationState(
+            simulation_id=simulation_id,
+            project_id=project_id,
+            graph_id=graph_id,
+            enable_twitter=enable_twitter,
+            enable_reddit=enable_reddit,
+            status=SimulationStatus.CREATED,
+        )
+        
+        self._save_simulation_state(state)
+        logger.info(f""创建模拟: {simulation_id}, project={project_id}, graph={graph_id}"")
+        
+        return state
+    
+    def prepare_simulation(
+        self,
+        simulation_id: str,
+        simulation_requirement: str,
+        document_text: str,
+        defined_entity_types: Optional[List[str]] = None,
+        use_llm_for_profiles: bool = True,
+        progress_callback: Optional[callable] = None,
+        parallel_profile_count: int = 3
+    ) -> SimulationState:
+        """"""
+        准备模拟环境（全程自动化）
+        
+        步骤：
+        1. 从Zep图谱读取并过滤实体
+        2. 为每个实体生成OASIS Agent Profile（可选LLM增强，支持并行）
+        3. 使用LLM智能生成模拟配置参数（时间、活跃度、发言频率等）
+        4. 保存配置文件和Profile文件
+        5. 复制预设脚本到模拟目录
+        
+        Args:
+            simulation_id: 模拟ID
+            simulation_requirement: 模拟需求描述（用于LLM生成配置）
+            document_text: 原始文档内容（用于LLM理解背景）
+            defined_entity_types: 预定义的实体类型（可选）
+            use_llm_for_profiles: 是否使用LLM生成详细人设
+            progress_callback: 进度回调函数 (stage, progress, message)
+            parallel_profile_count: 并行生成人设的数量，默认3
+            
+        Returns:
+            SimulationState
+  
+... [truncated]",""
+"Class:backend/app/services/simulation_ipc.py:CommandType:24","CommandType","backend/app/services/simulation_ipc.py",24,28,true,"
+
+class CommandType(str, Enum):
+    """"""命令类型""""""
+    INTERVIEW = ""interview""           # 单个Agent采访
+    BATCH_INTERVIEW = ""batch_interview""  # 批量采访
+    CLOSE_ENV = ""close_env""           # 关闭环境
+
+
+",""
+"Class:backend/app/services/simulation_ipc.py:CommandStatus:31","CommandStatus","backend/app/services/simulation_ipc.py",31,36,true,"
+
+class CommandStatus(str, Enum):
+    """"""命令状态""""""
+    PENDING = ""pending""
+    PROCESSING = ""processing""
+    COMPLETED = ""completed""
+    FAILED = ""failed""
+
+
+",""
+"Class:backend/app/services/simulation_ipc.py:IPCCommand:40","IPCCommand","backend/app/services/simulation_ipc.py",40,62,true,"
+@dataclass
+class IPCCommand:
+    """"""IPC命令""""""
+    command_id: str
+    command_type: CommandType
+    args: Dict[str, Any]
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""command_id"": self.command_id,
+            ""command_type"": self.command_type.value,
+            ""args"": self.args,
+            ""timestamp"": self.timestamp
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'IPCCommand':
+        return cls(
+            command_id=data[""command_id""],
+            command_type=CommandType(data[""command_type""]),
+            args=data.get(""args"", {}),
+            timestamp=data.get(""timestamp"", datetime.now().isoformat())
+        )
+
+
+",""
+"Class:backend/app/services/simulation_ipc.py:IPCResponse:66","IPCResponse","backend/app/services/simulation_ipc.py",66,91,true,"
+@dataclass
+class IPCResponse:
+    """"""IPC响应""""""
+    command_id: str
+    status: CommandStatus
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""command_id"": self.command_id,
+            ""status"": self.status.value,
+            ""result"": self.result,
+            ""error"": self.error,
+            ""timestamp"": self.timestamp
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'IPCResponse':
+        return cls(
+            command_id=data[""command_id""],
+            status=CommandStatus(data[""status""]),
+            result=data.get(""result""),
+            error=data.get(""error""),
+            timestamp=data.get(""timestamp"", datetime.now().isoformat())
+        )
+
+
+",""
+"Class:backend/app/services/simulation_ipc.py:SimulationIPCClient:94","SimulationIPCClient","backend/app/services/simulation_ipc.py",94,284,true,"
+
+class SimulationIPCClient:
+    """"""
+    模拟IPC客户端（Flask端使用）
+    
+    用于向模拟进程发送命令并等待响应
+    """"""
+    
+    def __init__(self, simulation_dir: str):
+        """"""
+        初始化IPC客户端
+        
+        Args:
+            simulation_dir: 模拟数据目录
+        """"""
+        self.simulation_dir = simulation_dir
+        self.commands_dir = os.path.join(simulation_dir, ""ipc_commands"")
+        self.responses_dir = os.path.join(simulation_dir, ""ipc_responses"")
+        
+        # 确保目录存在
+        os.makedirs(self.commands_dir, exist_ok=True)
+        os.makedirs(self.responses_dir, exist_ok=True)
+    
+    def send_command(
+        self,
+        command_type: CommandType,
+        args: Dict[str, Any],
+        timeout: float = 60.0,
+        poll_interval: float = 0.5
+    ) -> IPCResponse:
+        """"""
+        发送命令并等待响应
+        
+        Args:
+            command_type: 命令类型
+            args: 命令参数
+            timeout: 超时时间（秒）
+            poll_interval: 轮询间隔（秒）
+            
+        Returns:
+            IPCResponse
+            
+        Raises:
+            TimeoutError: 等待响应超时
+        """"""
+        command_id = str(uuid.uuid4())
+        command = IPCCommand(
+            command_id=command_id,
+            command_type=command_type,
+            args=args
+        )
+        
+        # 写入命令文件
+        command_file = os.path.join(self.commands_dir, f""{command_id}.json"")
+        with open(command_file, 'w', encoding='utf-8') as f:
+            json.dump(command.to_dict(), f, ensure_ascii=False, indent=2)
+        
+        logger.info(f""发送IPC命令: {command_type.value}, command_id={command_id}"")
+        
+        # 等待响应
+        response_file = os.path.join(self.responses_dir, f""{command_id}.json"")
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            if os.path.exists(response_file):
+                try:
+                    with open(response_file, 'r', encoding='utf-8') as f:
+                        response_data = json.load(f)
+                    response = IPCResponse.from_dict(response_data)
+                    
+                    # 清理命令和响应文件
+                    try:
+                        os.remove(command_file)
+                        os.remove(response_file)
+                    except OSError:
+                        pass
+                    
+                    logger.info(f""收到IPC响应: command_id={command_id}, status={response.status.value}"")
+                    return response
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f""解析响应失败: {e}"")
+            
+            time.sleep(poll_interval)
+        
+        # 超时
+        logger.error(f""等待IPC响应超时: command_id={command_id}"")
+        
+        # 清理命令文件
+        try:
+            os.remove(command_file)
+        except OSError:
+            pass
+        
+        raise TimeoutError(f""等待命令响应超时 ({timeout}秒)"")
+    
+    def send_interview(
+        self,
+        agent_id: int,
+        prompt: str,
+        platform: str = None,
+        timeout: float = 60.0
+    ) -> IPCResponse:
+        """"""
+        发送单个Agent采访命令
+        
+        Args:
+            agent_id: Agent ID
+            prompt: 采访问题
+            platform: 指定平台（可选）
+                - ""twitter"": 只采访Twitter平台
+                - ""reddit"": 只采访Reddit平台  
+                - None: 双平台模拟时同时采访两个平台，单平台模拟时采访该平台
+            timeout: 超时时间
+            
+        Returns:
+            IPCResponse，result字段包含采访结果
+        """"""
+        args = {
+            ""agent_id"": agent_id,
+            ""prompt"": prompt
+        }
+        if platform:
+            args[""platform""] = platform
+            
+        return self.send_command(
+            command_type=CommandType.INTERVIEW,
+            args=args,
+            timeout=timeout
+        )
+    
+    def send_batch_interview(
+        self,
+        interviews: List[Dict[str, Any]],
+        platform: str = None,
+        timeout: float = 120.0
+    ) -> IPCResponse:
+        """"""
+        发送批量采访命令
+        
+        Args:
+            interviews: 采访列表，每个元素包含 {""agent_id"": int, ""prompt"": str, ""platform"": str(可选)}
+            platform: 默认平台（可选，会被每个采访项的platform覆盖）
+                - ""twitter"": 默认只采访Twitter平台
+                - ""reddit"": 默认只采访Reddit平台
+                - None: 双平台模拟时每个Agent同时采访两个平台
+            timeout: 超时时间
+            
+        Returns:
+            IPCResponse，result字段包含所有采访结果
+        """"""
+        args = {""interviews"": interviews}
+        if platform:
+            args[""platform""] = platform
+            
+        return self.send_command(
+            command_type=CommandType.BATCH_INTERVIEW,
+            args=args,
+            timeout=timeout
+        )
+    
+    def send_close_env(self, timeout: float = 30.0) -> IPCResponse:
+        """"""
+        发送关闭环境命令
+        
+        Args:
+            timeout: 超时时间
+            
+        Returns:
+            IPCResponse
+        """"""
+        return self.send_command(
+... [truncated]",""
+"Class:backend/app/services/simulation_ipc.py:SimulationIPCServer:287","SimulationIPCServer","backend/app/services/simulation_ipc.py",287,393,true,"
+
+class SimulationIPCServer:
+    """"""
+    模拟IPC服务器（模拟脚本端使用）
+    
+    轮询命令目录，执行命令并返回响应
+    """"""
+    
+    def __init__(self, simulation_dir: str):
+        """"""
+        初始化IPC服务器
+        
+        Args:
+            simulation_dir: 模拟数据目录
+        """"""
+        self.simulation_dir = simulation_dir
+        self.commands_dir = os.path.join(simulation_dir, ""ipc_commands"")
+        self.responses_dir = os.path.join(simulation_dir, ""ipc_responses"")
+        
+        # 确保目录存在
+        os.makedirs(self.commands_dir, exist_ok=True)
+        os.makedirs(self.responses_dir, exist_ok=True)
+        
+        # 环境状态
+        self._running = False
+    
+    def start(self):
+        """"""标记服务器为运行状态""""""
+        self._running = True
+        self._update_env_status(""alive"")
+    
+    def stop(self):
+        """"""标记服务器为停止状态""""""
+        self._running = False
+        self._update_env_status(""stopped"")
+    
+    def _update_env_status(self, status: str):
+        """"""更新环境状态文件""""""
+        status_file = os.path.join(self.simulation_dir, ""env_status.json"")
+        with open(status_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                ""status"": status,
+                ""timestamp"": datetime.now().isoformat()
+            }, f, ensure_ascii=False, indent=2)
+    
+    def poll_commands(self) -> Optional[IPCCommand]:
+        """"""
+        轮询命令目录，返回第一个待处理的命令
+        
+        Returns:
+            IPCCommand 或 None
+        """"""
+        if not os.path.exists(self.commands_dir):
+            return None
+        
+        # 按时间排序获取命令文件
+        command_files = []
+        for filename in os.listdir(self.commands_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(self.commands_dir, filename)
+                command_files.append((filepath, os.path.getmtime(filepath)))
+        
+        command_files.sort(key=lambda x: x[1])
+        
+        for filepath, _ in command_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return IPCCommand.from_dict(data)
+            except (json.JSONDecodeError, KeyError, OSError) as e:
+                logger.warning(f""读取命令文件失败: {filepath}, {e}"")
+                continue
+        
+        return None
+    
+    def send_response(self, response: IPCResponse):
+        """"""
+        发送响应
+        
+        Args:
+            response: IPC响应
+        """"""
+        response_file = os.path.join(self.responses_dir, f""{response.command_id}.json"")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            json.dump(response.to_dict(), f, ensure_ascii=False, indent=2)
+        
+        # 删除命令文件
+        command_file = os.path.join(self.commands_dir, f""{response.command_id}.json"")
+        try:
+            os.remove(command_file)
+        except OSError:
+            pass
+    
+    def send_success(self, command_id: str, result: Dict[str, Any]):
+        """"""发送成功响应""""""
+        self.send_response(IPCResponse(
+            command_id=command_id,
+            status=CommandStatus.COMPLETED,
+            result=result
+        ))
+    
+    def send_error(self, command_id: str, error: str):
+        """"""发送错误响应""""""
+        self.send_response(IPCResponse(
+            command_id=command_id,
+            status=CommandStatus.FAILED,
+            error=error
+        ))
+",""
+"Class:backend/app/services/simulation_config_generator.py:AgentActivityConfig:51","AgentActivityConfig","backend/app/services/simulation_config_generator.py",51,79,true,"
+@dataclass
+class AgentActivityConfig:
+    """"""单个Agent的活动配置""""""
+    agent_id: int
+    entity_uuid: str
+    entity_name: str
+    entity_type: str
+    
+    # 活跃度配置 (0.0-1.0)
+    activity_level: float = 0.5  # 整体活跃度
+    
+    # 发言频率（每小时预期发言次数）
+    posts_per_hour: float = 1.0
+    comments_per_hour: float = 2.0
+    
+    # 活跃时间段（24小时制，0-23）
+    active_hours: List[int] = field(default_factory=lambda: list(range(8, 23)))
+    
+    # 响应速度（对热点事件的反应延迟，单位：模拟分钟）
+    response_delay_min: int = 5
+    response_delay_max: int = 60
+    
+    # 情感倾向 (-1.0到1.0，负面到正面)
+    sentiment_bias: float = 0.0
+    
+    # 立场（对特定话题的态度）
+    stance: str = ""neutral""  # supportive, opposing, neutral, observer
+    
+    # 影响力权重（决定其发言被其他Agent看到的概率）
+    influence_weight: float = 1.0
+
+
+",""
+"Class:backend/app/services/simulation_config_generator.py:TimeSimulationConfig:83","TimeSimulationConfig","backend/app/services/simulation_config_generator.py",83,109,true,"
+@dataclass  
+class TimeSimulationConfig:
+    """"""时间模拟配置（基于中国人作息习惯）""""""
+    # 模拟总时长（模拟小时数）
+    total_simulation_hours: int = 72  # 默认模拟72小时（3天）
+    
+    # 每轮代表的时间（模拟分钟）- 默认60分钟（1小时），加快时间流速
+    minutes_per_round: int = 60
+    
+    # 每小时激活的Agent数量范围
+    agents_per_hour_min: int = 5
+    agents_per_hour_max: int = 20
+    
+    # 高峰时段（晚间19-22点，中国人最活跃的时间）
+    peak_hours: List[int] = field(default_factory=lambda: [19, 20, 21, 22])
+    peak_activity_multiplier: float = 1.5
+    
+    # 低谷时段（凌晨0-5点，几乎无人活动）
+    off_peak_hours: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])
+    off_peak_activity_multiplier: float = 0.05  # 凌晨活跃度极低
+    
+    # 早间时段
+    morning_hours: List[int] = field(default_factory=lambda: [6, 7, 8])
+    morning_activity_multiplier: float = 0.4
+    
+    # 工作时段
+    work_hours: List[int] = field(default_factory=lambda: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+    work_activity_multiplier: float = 0.7
+
+
+",""
+"Class:backend/app/services/simulation_config_generator.py:EventConfig:113","EventConfig","backend/app/services/simulation_config_generator.py",113,125,true,"
+@dataclass
+class EventConfig:
+    """"""事件配置""""""
+    # 初始事件（模拟开始时的触发事件）
+    initial_posts: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # 定时事件（在特定时间触发的事件）
+    scheduled_events: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # 热点话题关键词
+    hot_topics: List[str] = field(default_factory=list)
+    
+    # 舆论引导方向
+    narrative_direction: str = """"
+
+
+",""
+"Class:backend/app/services/simulation_config_generator.py:PlatformConfig:129","PlatformConfig","backend/app/services/simulation_config_generator.py",129,142,true,"
+@dataclass
+class PlatformConfig:
+    """"""平台特定配置""""""
+    platform: str  # twitter or reddit
+    
+    # 推荐算法权重
+    recency_weight: float = 0.4  # 时间新鲜度
+    popularity_weight: float = 0.3  # 热度
+    relevance_weight: float = 0.3  # 相关性
+    
+    # 病毒传播阈值（达到多少互动后触发扩散）
+    viral_threshold: int = 10
+    
+    # 回声室效应强度（相似观点聚集程度）
+    echo_chamber_strength: float = 0.5
+
+
+",""
+"Class:backend/app/services/simulation_config_generator.py:SimulationParameters:146","SimulationParameters","backend/app/services/simulation_config_generator.py",146,196,true,"
+@dataclass
+class SimulationParameters:
+    """"""完整的模拟参数配置""""""
+    # 基础信息
+    simulation_id: str
+    project_id: str
+    graph_id: str
+    simulation_requirement: str
+    
+    # 时间配置
+    time_config: TimeSimulationConfig = field(default_factory=TimeSimulationConfig)
+    
+    # Agent配置列表
+    agent_configs: List[AgentActivityConfig] = field(default_factory=list)
+    
+    # 事件配置
+    event_config: EventConfig = field(default_factory=EventConfig)
+    
+    # 平台配置
+    twitter_config: Optional[PlatformConfig] = None
+    reddit_config: Optional[PlatformConfig] = None
+    
+    # LLM配置
+    llm_model: str = """"
+    llm_base_url: str = """"
+    
+    # 生成元数据
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    generation_reasoning: str = """"  # LLM的推理说明
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """"""转换为字典""""""
+        time_dict = asdict(self.time_config)
+        return {
+            ""simulation_id"": self.simulation_id,
+            ""project_id"": self.project_id,
+            ""graph_id"": self.graph_id,
+            ""simulation_requirement"": self.simulation_requirement,
+            ""time_config"": time_dict,
+            ""agent_configs"": [asdict(a) for a in self.agent_configs],
+            ""event_config"": asdict(self.event_config),
+            ""twitter_config"": asdict(self.twitter_config) if self.twitter_config else None,
+            ""reddit_config"": asdict(self.reddit_config) if self.reddit_config else None,
+            ""llm_model"": self.llm_model,
+            ""llm_base_url"": self.llm_base_url,
+            ""generated_at"": self.generated_at,
+            ""generation_reasoning"": self.generation_reasoning,
+        }
+    
+    def to_json(self, indent: int = 2) -> str:
+        """"""转换为JSON字符串""""""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+
+",""
+"Class:backend/app/services/simulation_config_generator.py:SimulationConfigGenerator:199","SimulationConfigGenerator","backend/app/services/simulation_config_generator.py",199,985,true,"
+
+class SimulationConfigGenerator:
+    """"""
+    模拟配置智能生成器
+    
+    使用LLM分析模拟需求、文档内容、图谱实体信息，
+    自动生成最佳的模拟参数配置
+    
+    采用分步生成策略：
+    1. 生成时间配置和事件配置（轻量级）
+    2. 分批生成Agent配置（每批10-20个）
+    3. 生成平台配置
+    """"""
+    
+    # 上下文最大字符数
+    MAX_CONTEXT_LENGTH = 50000
+    # 每批生成的Agent数量
+    AGENTS_PER_BATCH = 15
+    
+    # 各步骤的上下文截断长度（字符数）
+    TIME_CONFIG_CONTEXT_LENGTH = 10000   # 时间配置
+    EVENT_CONFIG_CONTEXT_LENGTH = 8000   # 事件配置
+    ENTITY_SUMMARY_LENGTH = 300          # 实体摘要
+    AGENT_SUMMARY_LENGTH = 300           # Agent配置中的实体摘要
+    ENTITIES_PER_TYPE_DISPLAY = 20       # 每类实体显示数量
+    
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None
+    ):
+        self.api_key = api_key or Config.LLM_API_KEY
+        self.base_url = base_url or Config.LLM_BASE_URL
+        self.model_name = model_name or Config.LLM_MODEL_NAME
+        
+        if not self.api_key:
+            raise ValueError(""LLM_API_KEY 未配置"")
+        
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+    
+    def generate_config(
+        self,
+        simulation_id: str,
+        project_id: str,
+        graph_id: str,
+        simulation_requirement: str,
+        document_text: str,
+        entities: List[EntityNode],
+        enable_twitter: bool = True,
+        enable_reddit: bool = True,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> SimulationParameters:
+        """"""
+        智能生成完整的模拟配置（分步生成）
+        
+        Args:
+            simulation_id: 模拟ID
+            project_id: 项目ID
+            graph_id: 图谱ID
+            simulation_requirement: 模拟需求描述
+            document_text: 原始文档内容
+            entities: 过滤后的实体列表
+            enable_twitter: 是否启用Twitter
+            enable_reddit: 是否启用Reddit
+            progress_callback: 进度回调函数(current_step, total_steps, message)
+            
+        Returns:
+            SimulationParameters: 完整的模拟参数
+        """"""
+        logger.info(f""开始智能生成模拟配置: simulation_id={simulation_id}, 实体数={len(entities)}"")
+        
+        # 计算总步骤数
+        num_batches = math.ceil(len(entities) / self.AGENTS_PER_BATCH)
+        total_steps = 3 + num_batches  # 时间配置 + 事件配置 + N批Agent + 平台配置
+        current_step = 0
+        
+        def report_progress(step: int, message: str):
+            nonlocal current_step
+            current_step = step
+            if progress_callback:
+                progress_callback(step, total_steps, message)
+            logger.info(f""[{step}/{total_steps}] {message}"")
+        
+        # 1. 构建基础上下文信息
+        context = self._build_context(
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            entities=entities
+        )
+        
+        reasoning_parts = []
+        
+        # ========== 步骤1: 生成时间配置 ==========
+        report_progress(1, ""生成时间配置..."")
+        num_entities = len(entities)
+        time_config_result = self._generate_time_config(context, num_entities)
+        time_config = self._parse_time_config(time_config_result, num_entities)
+        reasoning_parts.append(f""时间配置: {time_config_result.get('reasoning', '成功')}"")
+        
+        # ========== 步骤2: 生成事件配置 ==========
+        report_progress(2, ""生成事件配置和热点话题..."")
+        event_config_result = self._generate_event_config(context, simulation_requirement, entities)
+        event_config = self._parse_event_config(event_config_result)
+        reasoning_parts.append(f""事件配置: {event_config_result.get('reasoning', '成功')}"")
+        
+        # ========== 步骤3-N: 分批生成Agent配置 ==========
+        all_agent_configs = []
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * self.AGENTS_PER_BATCH
+            end_idx = min(start_idx + self.AGENTS_PER_BATCH, len(entities))
+            batch_entities = entities[start_idx:end_idx]
+            
+            report_progress(
+                3 + batch_idx,
+                f""生成Agent配置 ({start_idx + 1}-{end_idx}/{len(entities)})...""
+            )
+            
+            batch_configs = self._generate_agent_configs_batch(
+                context=context,
+                entities=batch_entities,
+                start_idx=start_idx,
+                simulation_requirement=simulation_requirement
+            )
+            all_agent_configs.extend(batch_configs)
+        
+        reasoning_parts.append(f""Agent配置: 成功生成 {len(all_agent_configs)} 个"")
+        
+        # ========== 为初始帖子分配发布者 Agent ==========
+        logger.info(""为初始帖子分配合适的发布者 Agent..."")
+        event_config = self._assign_initial_post_agents(event_config, all_agent_configs)
+        assigned_count = len([p for p in event_config.initial_posts if p.get(""poster_agent_id"") is not None])
+        reasoning_parts.append(f""初始帖子分配: {assigned_count} 个帖子已分配发布者"")
+        
+        # ========== 最后一步: 生成平台配置
+... [truncated]",""
+"Class:backend/app/services/report_agent.py:ReportLogger:35","ReportLogger","backend/app/services/report_agent.py",35,303,true,"
+
+class ReportLogger:
+    """"""
+    Report Agent 详细日志记录器
+    
+    在报告文件夹中生成 agent_log.jsonl 文件，记录每一步详细动作。
+    每行是一个完整的 JSON 对象，包含时间戳、动作类型、详细内容等。
+    """"""
+    
+    def __init__(self, report_id: str):
+        """"""
+        初始化日志记录器
+        
+        Args:
+            report_id: 报告ID，用于确定日志文件路径
+        """"""
+        self.report_id = report_id
+        self.log_file_path = os.path.join(
+            Config.UPLOAD_FOLDER, 'reports', report_id, 'agent_log.jsonl'
+        )
+        self.start_time = datetime.now()
+        self._ensure_log_file()
+    
+    def _ensure_log_file(self):
+        """"""确保日志文件所在目录存在""""""
+        log_dir = os.path.dirname(self.log_file_path)
+        os.makedirs(log_dir, exist_ok=True)
+    
+    def _get_elapsed_time(self) -> float:
+        """"""获取从开始到现在的耗时（秒）""""""
+        return (datetime.now() - self.start_time).total_seconds()
+    
+    def log(
+        self, 
+        action: str, 
+        stage: str,
+        details: Dict[str, Any],
+        section_title: str = None,
+        section_index: int = None
+    ):
+        """"""
+        记录一条日志
+        
+        Args:
+            action: 动作类型，如 'start', 'tool_call', 'llm_response', 'section_complete' 等
+            stage: 当前阶段，如 'planning', 'generating', 'completed'
+            details: 详细内容字典，不截断
+            section_title: 当前章节标题（可选）
+            section_index: 当前章节索引（可选）
+        """"""
+        log_entry = {
+            ""timestamp"": datetime.now().isoformat(),
+            ""elapsed_seconds"": round(self._get_elapsed_time(), 2),
+            ""report_id"": self.report_id,
+            ""action"": action,
+            ""stage"": stage,
+            ""section_title"": section_title,
+            ""section_index"": section_index,
+            ""details"": details
+        }
+        
+        # 追加写入 JSONL 文件
+        with open(self.log_file_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+    
+    def log_start(self, simulation_id: str, graph_id: str, simulation_requirement: str):
+        """"""记录报告生成开始""""""
+        self.log(
+            action=""report_start"",
+            stage=""pending"",
+            details={
+                ""simulation_id"": simulation_id,
+                ""graph_id"": graph_id,
+                ""simulation_requirement"": simulation_requirement,
+                ""message"": ""报告生成任务开始""
+            }
+        )
+    
+    def log_planning_start(self):
+        """"""记录大纲规划开始""""""
+        self.log(
+            action=""planning_start"",
+            stage=""planning"",
+            details={""message"": ""开始规划报告大纲""}
+        )
+    
+    def log_planning_context(self, context: Dict[str, Any]):
+        """"""记录规划时获取的上下文信息""""""
+        self.log(
+            action=""planning_context"",
+            stage=""planning"",
+            details={
+                ""message"": ""获取模拟上下文信息"",
+                ""context"": context
+            }
+        )
+    
+    def log_planning_complete(self, outline_dict: Dict[str, Any]):
+        """"""记录大纲规划完成""""""
+        self.log(
+            action=""planning_complete"",
+            stage=""planning"",
+            details={
+                ""message"": ""大纲规划完成"",
+                ""outline"": outline_dict
+            }
+        )
+    
+    def log_section_start(self, section_title: str, section_index: int):
+        """"""记录章节生成开始""""""
+        self.log(
+            action=""section_start"",
+            stage=""generating"",
+            section_title=section_title,
+            section_index=section_index,
+            details={""message"": f""开始生成章节: {section_title}""}
+        )
+    
+    def log_react_thought(self, section_title: str, section_index: int, iteration: int, thought: str):
+        """"""记录 ReACT 思考过程""""""
+        self.log(
+            action=""react_thought"",
+            stage=""generating"",
+            section_title=section_title,
+            section_index=section_index,
+            details={
+                ""iteration"": iteration,
+                ""thought"": thought,
+                ""message"": f""ReACT 第{iteration}轮思考""
+            }
+        )
+    
+    def log_tool_call(
+        self, 
+        section_title: str, 
+        section_index: int,
+        tool_name: str, 
+        parameters: Dict[str, Any],
+        iteration: int
+    ):
+        """"""记录工具调用""""""
+        self.log(
+            action=""tool_call"",
+            stage=""generating"",
+            section_title=section_title,
+            section_index=section_index,
+            details={
+                ""iteration"": iteration,
+                ""tool_name"": tool_name,
+                ""parameters"": parameters,
+                ""message"": f""调用工具: {tool_name}""
+            }
+        )
+    
+    def log_tool_result(
+        self,
+        section_title: str,
+        section_index: int,
+        tool_name: str,
+        result: str,
+        iteration: int
+    ):
+        """"""记录工具调用结果（完整内容，不截断）""""""
+        self.log(
+            action=""tool_result"",
+            stage=""generating"",
+      
+... [truncated]",""
+"Class:backend/app/services/report_agent.py:ReportConsoleLogger:306","ReportConsoleLogger","backend/app/services/report_agent.py",306,385,true,"
+
+class ReportConsoleLogger:
+    """"""
+    Report Agent 控制台日志记录器
+    
+    将控制台风格的日志（INFO、WARNING等）写入报告文件夹中的 console_log.txt 文件。
+    这些日志与 agent_log.jsonl 不同，是纯文本格式的控制台输出。
+    """"""
+    
+    def __init__(self, report_id: str):
+        """"""
+        初始化控制台日志记录器
+        
+        Args:
+            report_id: 报告ID，用于确定日志文件路径
+        """"""
+        self.report_id = report_id
+        self.log_file_path = os.path.join(
+            Config.UPLOAD_FOLDER, 'reports', report_id, 'console_log.txt'
+        )
+        self._ensure_log_file()
+        self._file_handler = None
+        self._setup_file_handler()
+    
+    def _ensure_log_file(self):
+        """"""确保日志文件所在目录存在""""""
+        log_dir = os.path.dirname(self.log_file_path)
+        os.makedirs(log_dir, exist_ok=True)
+    
+    def _setup_file_handler(self):
+        """"""设置文件处理器，将日志同时写入文件""""""
+        import logging
+        
+        # 创建文件处理器
+        self._file_handler = logging.FileHandler(
+            self.log_file_path,
+            mode='a',
+            encoding='utf-8'
+        )
+        self._file_handler.setLevel(logging.INFO)
+        
+        # 使用与控制台相同的简洁格式
+        formatter = logging.Formatter(
+            '[%(asctime)s] %(levelname)s: %(message)s',
+            datefmt='%H:%M:%S'
+        )
+        self._file_handler.setFormatter(formatter)
+        
+        # 添加到 report_agent 相关的 logger
+        loggers_to_attach = [
+            'mirofish.report_agent',
+            'mirofish.zep_tools',
+        ]
+        
+        for logger_name in loggers_to_attach:
+            target_logger = logging.getLogger(logger_name)
+            # 避免重复添加
+            if self._file_handler not in target_logger.handlers:
+                target_logger.addHandler(self._file_handler)
+    
+    def close(self):
+        """"""关闭文件处理器并从 logger 中移除""""""
+        import logging
+        
+        if self._file_handler:
+            loggers_to_detach = [
+                'mirofish.report_agent',
+                'mirofish.zep_tools',
+            ]
+            
+            for logger_name in loggers_to_detach:
+                target_logger = logging.getLogger(logger_name)
+                if self._file_handler in target_logger.handlers:
+                    target_logger.removeHandler(self._file_handler)
+            
+            self._file_handler.close()
+            self._file_handler = None
+    
+    def __del__(self):
+        """"""析构时确保关闭文件处理器""""""
+        self.close()
+
+
+",""
+"Class:backend/app/services/report_agent.py:ReportStatus:388","ReportStatus","backend/app/services/report_agent.py",388,394,true,"
+
+class ReportStatus(str, Enum):
+    """"""报告状态""""""
+    PENDING = ""pending""
+    PLANNING = ""planning""
+    GENERATING = ""generating""
+    COMPLETED = ""completed""
+    FAILED = ""failed""
+
+
+",""
+"Class:backend/app/services/report_agent.py:ReportSection:398","ReportSection","backend/app/services/report_agent.py",398,414,true,"
+@dataclass
+class ReportSection:
+    """"""报告章节""""""
+    title: str
+    content: str = """"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""title"": self.title,
+            ""content"": self.content
+        }
+
+    def to_markdown(self, level: int = 2) -> str:
+        """"""转换为Markdown格式""""""
+        md = f""{'#' * level} {self.title}\n\n""
+        if self.content:
+            md += f""{self.content}\n\n""
+        return md
+
+
+",""
+"Class:backend/app/services/report_agent.py:ReportOutline:418","ReportOutline","backend/app/services/report_agent.py",418,437,true,"
+@dataclass
+class ReportOutline:
+    """"""报告大纲""""""
+    title: str
+    summary: str
+    sections: List[ReportSection]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""title"": self.title,
+            ""summary"": self.summary,
+            ""sections"": [s.to_dict() for s in self.sections]
+        }
+    
+    def to_markdown(self) -> str:
+        """"""转换为Markdown格式""""""
+        md = f""# {self.title}\n\n""
+        md += f""> {self.summary}\n\n""
+        for section in self.sections:
+            md += section.to_markdown()
+        return md
+
+
+",""
+"Class:backend/app/services/report_agent.py:Report:441","Report","backend/app/services/report_agent.py",441,466,true,"
+@dataclass
+class Report:
+    """"""完整报告""""""
+    report_id: str
+    simulation_id: str
+    graph_id: str
+    simulation_requirement: str
+    status: ReportStatus
+    outline: Optional[ReportOutline] = None
+    markdown_content: str = """"
+    created_at: str = """"
+    completed_at: str = """"
+    error: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""report_id"": self.report_id,
+            ""simulation_id"": self.simulation_id,
+            ""graph_id"": self.graph_id,
+            ""simulation_requirement"": self.simulation_requirement,
+            ""status"": self.status.value,
+            ""outline"": self.outline.to_dict() if self.outline else None,
+            ""markdown_content"": self.markdown_content,
+            ""created_at"": self.created_at,
+            ""completed_at"": self.completed_at,
+            ""error"": self.error
+        }
+
+
+",""
+"Class:backend/app/services/report_agent.py:ReportAgent:864","ReportAgent","backend/app/services/report_agent.py",864,1880,true,"
+
+class ReportAgent:
+    """"""
+    Report Agent - 模拟报告生成Agent
+
+    采用ReACT（Reasoning + Acting）模式：
+    1. 规划阶段：分析模拟需求，规划报告目录结构
+    2. 生成阶段：逐章节生成内容，每章节可多次调用工具获取信息
+    3. 反思阶段：检查内容完整性和准确性
+    """"""
+    
+    # 最大工具调用次数（每个章节）
+    MAX_TOOL_CALLS_PER_SECTION = 5
+    
+    # 最大反思轮数
+    MAX_REFLECTION_ROUNDS = 3
+    
+    # 对话中的最大工具调用次数
+    MAX_TOOL_CALLS_PER_CHAT = 2
+    
+    def __init__(
+        self, 
+        graph_id: str,
+        simulation_id: str,
+        simulation_requirement: str,
+        llm_client: Optional[LLMClient] = None,
+        zep_tools: Optional[ZepToolsService] = None
+    ):
+        """"""
+        初始化Report Agent
+        
+        Args:
+            graph_id: 图谱ID
+            simulation_id: 模拟ID
+            simulation_requirement: 模拟需求描述
+            llm_client: LLM客户端（可选）
+            zep_tools: Zep工具服务（可选）
+        """"""
+        self.graph_id = graph_id
+        self.simulation_id = simulation_id
+        self.simulation_requirement = simulation_requirement
+        
+        self.llm = llm_client or LLMClient()
+        self.zep_tools = zep_tools or ZepToolsService()
+        
+        # 工具定义
+        self.tools = self._define_tools()
+        
+        # 日志记录器（在 generate_report 中初始化）
+        self.report_logger: Optional[ReportLogger] = None
+        # 控制台日志记录器（在 generate_report 中初始化）
+        self.console_logger: Optional[ReportConsoleLogger] = None
+        
+        logger.info(f""ReportAgent 初始化完成: graph_id={graph_id}, simulation_id={simulation_id}"")
+    
+    def _define_tools(self) -> Dict[str, Dict[str, Any]]:
+        """"""定义可用工具""""""
+        return {
+            ""insight_forge"": {
+                ""name"": ""insight_forge"",
+                ""description"": TOOL_DESC_INSIGHT_FORGE,
+                ""parameters"": {
+                    ""query"": ""你想深入分析的问题或话题"",
+                    ""report_context"": ""当前报告章节的上下文（可选，有助于生成更精准的子问题）""
+                }
+            },
+            ""panorama_search"": {
+                ""name"": ""panorama_search"",
+                ""description"": TOOL_DESC_PANORAMA_SEARCH,
+                ""parameters"": {
+                    ""query"": ""搜索查询，用于相关性排序"",
+                    ""include_expired"": ""是否包含过期/历史内容（默认True）""
+                }
+            },
+            ""quick_search"": {
+                ""name"": ""quick_search"",
+                ""description"": TOOL_DESC_QUICK_SEARCH,
+                ""parameters"": {
+                    ""query"": ""搜索查询字符串"",
+                    ""limit"": ""返回结果数量（可选，默认10）""
+                }
+            },
+            ""interview_agents"": {
+                ""name"": ""interview_agents"",
+                ""description"": TOOL_DESC_INTERVIEW_AGENTS,
+                ""parameters"": {
+                    ""interview_topic"": ""采访主题或需求描述（如：'了解学生对宿舍甲醛事件的看法'）"",
+                    ""max_agents"": ""最多采访的Agent数量（可选，默认5，最大10）""
+                }
+            }
+        }
+    
+    def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = """") -> str:
+        """"""
+        执行工具调用
+        
+        Args:
+            tool_name: 工具名称
+            parameters: 工具参数
+            report_context: 报告上下文（用于InsightForge）
+            
+        Returns:
+            工具执行结果（文本格式）
+        """"""
+        logger.info(f""执行工具: {tool_name}, 参数: {parameters}"")
+        
+        try:
+            if tool_name == ""insight_forge"":
+                query = parameters.get(""query"", """")
+                ctx = parameters.get(""report_context"", """") or report_context
+                result = self.zep_tools.insight_forge(
+                    graph_id=self.graph_id,
+                    query=query,
+                    simulation_requirement=self.simulation_requirement,
+                    report_context=ctx
+                )
+                return result.to_text()
+            
+            elif tool_name == ""panorama_search"":
+                # 广度搜索 - 获取全貌
+                query = parameters.get(""query"", """")
+                include_expired = parameters.get(""include_expired"", True)
+                if isinstance(include_expired, str):
+                    include_expired = include_expired.lower() in ['true', '1', 'yes']
+                result = self.zep_tools.panorama_search(
+                    graph_id=self.graph_id,
+                    query=query,
+                    include_expired=include_expired
+                )
+                return result.to_text()
+            
+            elif tool_name == ""quick_search"":
+                # 简单搜索 - 快速检索
+                query = parameters.get(""query"", """")
+                limit = parameters.get(""limit"", 10)
+                if isinstance(limit, str):
+                    limit = int(limit)
+                result = self.zep_tools.quick_search(
+                    graph_id=self.graph_id,
+                    query=query,
+                    limit=limit
+                )
+                return result.to_text()
+            
+            elif tool_name == ""interview_agents"":
+    
+... [truncated]",""
+"Class:backend/app/services/report_agent.py:ReportManager:1883","ReportManager","backend/app/services/report_agent.py",1883,2571,true,"
+
+class ReportManager:
+    """"""
+    报告管理器
+    
+    负责报告的持久化存储和检索
+    
+    文件结构（分章节输出）：
+    reports/
+      {report_id}/
+        meta.json          - 报告元信息和状态
+        outline.json       - 报告大纲
+        progress.json      - 生成进度
+        section_01.md      - 第1章节
+        section_02.md      - 第2章节
+        ...
+        full_report.md     - 完整报告
+    """"""
+    
+    # 报告存储目录
+    REPORTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'reports')
+    
+    @classmethod
+    def _ensure_reports_dir(cls):
+        """"""确保报告根目录存在""""""
+        os.makedirs(cls.REPORTS_DIR, exist_ok=True)
+    
+    @classmethod
+    def _get_report_folder(cls, report_id: str) -> str:
+        """"""获取报告文件夹路径""""""
+        return os.path.join(cls.REPORTS_DIR, report_id)
+    
+    @classmethod
+    def _ensure_report_folder(cls, report_id: str) -> str:
+        """"""确保报告文件夹存在并返回路径""""""
+        folder = cls._get_report_folder(report_id)
+        os.makedirs(folder, exist_ok=True)
+        return folder
+    
+    @classmethod
+    def _get_report_path(cls, report_id: str) -> str:
+        """"""获取报告元信息文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""meta.json"")
+    
+    @classmethod
+    def _get_report_markdown_path(cls, report_id: str) -> str:
+        """"""获取完整报告Markdown文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""full_report.md"")
+    
+    @classmethod
+    def _get_outline_path(cls, report_id: str) -> str:
+        """"""获取大纲文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""outline.json"")
+    
+    @classmethod
+    def _get_progress_path(cls, report_id: str) -> str:
+        """"""获取进度文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""progress.json"")
+    
+    @classmethod
+    def _get_section_path(cls, report_id: str, section_index: int) -> str:
+        """"""获取章节Markdown文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), f""section_{section_index:02d}.md"")
+    
+    @classmethod
+    def _get_agent_log_path(cls, report_id: str) -> str:
+        """"""获取 Agent 日志文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""agent_log.jsonl"")
+    
+    @classmethod
+    def _get_console_log_path(cls, report_id: str) -> str:
+        """"""获取控制台日志文件路径""""""
+        return os.path.join(cls._get_report_folder(report_id), ""console_log.txt"")
+    
+    @classmethod
+    def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
+        """"""
+        获取控制台日志内容
+        
+        这是报告生成过程中的控制台输出日志（INFO、WARNING等），
+        与 agent_log.jsonl 的结构化日志不同。
+        
+        Args:
+            report_id: 报告ID
+            from_line: 从第几行开始读取（用于增量获取，0 表示从头开始）
+            
+        Returns:
+            {
+                ""logs"": [日志行列表],
+                ""total_lines"": 总行数,
+                ""from_line"": 起始行号,
+                ""has_more"": 是否还有更多日志
+            }
+        """"""
+        log_path = cls._get_console_log_path(report_id)
+        
+        if not os.path.exists(log_path):
+            return {
+                ""logs"": [],
+                ""total_lines"": 0,
+                ""from_line"": 0,
+                ""has_more"": False
+            }
+        
+        logs = []
+        total_lines = 0
+        
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                total_lines = i + 1
+                if i >= from_line:
+                    # 保留原始日志行，去掉末尾换行符
+                    logs.append(line.rstrip('\n\r'))
+        
+        return {
+            ""logs"": logs,
+            ""total_lines"": total_lines,
+            ""from_line"": from_line,
+            ""has_more"": False  # 已读取到末尾
+        }
+    
+    @classmethod
+    def get_console_log_stream(cls, report_id: str) -> List[str]:
+        """"""
+        获取完整的控制台日志（一次性获取全部）
+        
+        Args:
+            report_id: 报告ID
+            
+        Returns:
+            日志行列表
+        """"""
+        result = cls.get_console_log(report_id, from_line=0)
+        return result[""logs""]
+    
+    @classmethod
+    def get_agent_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
+        """"""
+        获取 Agent 日志内容
+        
+        Args:
+            report_id: 报告ID
+            from_line: 从第几行开始读取（用于增量获取，0 表示从头开始）
+            
+        Returns:
+            {
+                ""logs"": [日志条目列表],
+                ""total_lines"": 总行数,
+                ""from_line"": 起始行号,
+                ""has_more"": 是否还有更多日志
+            }
+        """"""
+        log_path = cls._get_agent_log_path(report_id)
+        
+        if not os.path.exists(log_path):
+            return {
+                ""logs"": [],
+                ""total_lines"": 0,
+                ""from_line"": 0,
+                ""has_more"": False
+            }
+        
+        logs = []
+        total_lines = 0
+        
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                total_lines = i + 1
+  
+... [truncated]",""
+"Class:backend/app/services/ontology_generator.py:OntologyGenerator:158","OntologyGenerator","backend/app/services/ontology_generator.py",158,455,true,"
+
+class OntologyGenerator:
+    """"""
+    本体生成器
+    分析文本内容，生成实体和关系类型定义
+    """"""
+    
+    def __init__(self, llm_client: Optional[LLMClient] = None):
+        self.llm_client = llm_client or LLMClient()
+    
+    def generate(
+        self,
+        document_texts: List[str],
+        simulation_requirement: str,
+        additional_context: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """"""
+        生成本体定义
+        
+        Args:
+            document_texts: 文档文本列表
+            simulation_requirement: 模拟需求描述
+            additional_context: 额外上下文
+            
+        Returns:
+            本体定义（entity_types, edge_types等）
+        """"""
+        # 构建用户消息
+        user_message = self._build_user_message(
+            document_texts, 
+            simulation_requirement,
+            additional_context
+        )
+        
+        lang_instruction = get_prompt_language_instruction()
+        system_prompt = ONTOLOGY_SYSTEM_PROMPT + lang_instruction
+
+        messages = [
+            {""role"": ""system"", ""content"": system_prompt},
+            {""role"": ""user"", ""content"": user_message}
+        ]
+        
+        # 调用LLM
+        result = self.llm_client.chat_json(
+            messages=messages,
+            temperature=0.3,
+            max_tokens=4096
+        )
+        
+        # 验证和后处理
+        result = self._validate_and_process(result)
+        
+        return result
+    
+    # 传给 LLM 的文本最大长度（5万字）
+    MAX_TEXT_LENGTH_FOR_LLM = 50000
+    
+    def _build_user_message(
+        self,
+        document_texts: List[str],
+        simulation_requirement: str,
+        additional_context: Optional[str]
+    ) -> str:
+        """"""构建用户消息""""""
+        
+        # 合并文本
+        combined_text = ""\n\n---\n\n"".join(document_texts)
+        original_length = len(combined_text)
+        
+        # 如果文本超过5万字，截断（仅影响传给LLM的内容，不影响图谱构建）
+        if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
+            combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
+            combined_text += f""\n\n...(原文共{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)...""
+        
+        message = f""""""## 模拟需求
+
+{simulation_requirement}
+
+## 文档内容
+
+{combined_text}
+""""""
+        
+        if additional_context:
+            message += f""""""
+## 额外说明
+
+{additional_context}
+""""""
+        
+        message += """"""
+请根据以上内容，设计适合社会舆论模拟的实体类型和关系类型。
+
+**必须遵守的规则**：
+1. 必须正好输出10个实体类型
+2. 最后2个必须是兜底类型：Person（个人兜底）和 Organization（组织兜底）
+3. 前8个是根据文本内容设计的具体类型
+4. 所有实体类型必须是现实中可以发声的主体，不能是抽象概念
+5. 属性名不能使用 name、uuid、group_id 等保留字，用 full_name、org_name 等替代
+""""""
+        
+        return message
+    
+    def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """"""验证和后处理结果""""""
+        
+        # 确保必要字段存在
+        if ""entity_types"" not in result:
+            result[""entity_types""] = []
+        if ""edge_types"" not in result:
+            result[""edge_types""] = []
+        if ""analysis_summary"" not in result:
+            result[""analysis_summary""] = """"
+        
+        # 验证实体类型
+        for entity in result[""entity_types""]:
+            if ""attributes"" not in entity:
+                entity[""attributes""] = []
+            if ""examples"" not in entity:
+                entity[""examples""] = []
+            # 确保description不超过100字符
+            if len(entity.get(""description"", """")) > 100:
+                entity[""description""] = entity[""description""][:97] + ""...""
+        
+        # 验证关系类型
+        for edge in result[""edge_types""]:
+            if ""source_targets"" not in edge:
+                edge[""source_targets""] = []
+            if ""attributes"" not in edge:
+                edge[""attributes""] = []
+            if len(edge.get(""description"", """")) > 100:
+                edge[""description""] = edge[""description""][:97] + ""...""
+        
+        # Zep API 限制：最多 10 个自定义实体类型，最多 10 个自定义边类型
+        MAX_ENTITY_TYPES = 10
+        MAX_EDGE_TYPES = 10
+        
+        # 兜底类型定义
+        person_fallback = {
+            ""name"": ""Person"",
+            ""description"": ""Any individual person not fitting other specific person types."",
+            ""attributes"": [
+                {""name"": ""full_name"", ""type"": ""text"", ""description"": ""Full name of the person""},
+                {""name"": ""role"", ""type"": ""text"", ""description"": ""Role or occupation""}
+            ],
+            ""examples"": [""ordinary citizen"", ""anonymous netizen""]
+        }
+        
+        organization_fallback = {
+            ""name"": ""Organization"",
+            ""description"": ""Any organization not fitting other specific organization types."",
+            ""attributes"": [
+                {""name"": ""org_name"", ""type"": ""text"", ""description"": ""Name of the organization""},
+                {""name"": ""org_type"", ""type"": ""text"", ""description"": ""Type of organization""}
+            ],
+            ""examples"": [""small business"", ""community group""]
+        }
+        
+        # 检查是否已有兜底类型
+        entity_names = {e[""name""] for e in result[""
+... [truncated]",""
+"Class:backend/app/services/oasis_profile_generator.py:OasisAgentProfile:29","OasisAgentProfile","backend/app/services/oasis_profile_generator.py",29,139,true,"
+@dataclass
+class OasisAgentProfile:
+    """"""OASIS Agent Profile数据结构""""""
+    # 通用字段
+    user_id: int
+    user_name: str
+    name: str
+    bio: str
+    persona: str
+    
+    # 可选字段 - Reddit风格
+    karma: int = 1000
+    
+    # 可选字段 - Twitter风格
+    friend_count: int = 100
+    follower_count: int = 150
+    statuses_count: int = 500
+    
+    # 额外人设信息
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    mbti: Optional[str] = None
+    country: Optional[str] = None
+    profession: Optional[str] = None
+    interested_topics: List[str] = field(default_factory=list)
+    
+    # 来源实体信息
+    source_entity_uuid: Optional[str] = None
+    source_entity_type: Optional[str] = None
+    
+    created_at: str = field(default_factory=lambda: datetime.now().strftime(""%Y-%m-%d""))
+    
+    def to_reddit_format(self) -> Dict[str, Any]:
+        """"""转换为Reddit平台格式""""""
+        profile = {
+            ""user_id"": self.user_id,
+            ""username"": self.user_name,  # OASIS 库要求字段名为 username（无下划线）
+            ""name"": self.name,
+            ""bio"": self.bio,
+            ""persona"": self.persona,
+            ""karma"": self.karma,
+            ""created_at"": self.created_at,
+        }
+        
+        # 添加额外人设信息（如果有）
+        if self.age:
+            profile[""age""] = self.age
+        if self.gender:
+            profile[""gender""] = self.gender
+        if self.mbti:
+            profile[""mbti""] = self.mbti
+        if self.country:
+            profile[""country""] = self.country
+        if self.profession:
+            profile[""profession""] = self.profession
+        if self.interested_topics:
+            profile[""interested_topics""] = self.interested_topics
+        
+        return profile
+    
+    def to_twitter_format(self) -> Dict[str, Any]:
+        """"""转换为Twitter平台格式""""""
+        profile = {
+            ""user_id"": self.user_id,
+            ""username"": self.user_name,  # OASIS 库要求字段名为 username（无下划线）
+            ""name"": self.name,
+            ""bio"": self.bio,
+            ""persona"": self.persona,
+            ""friend_count"": self.friend_count,
+            ""follower_count"": self.follower_count,
+            ""statuses_count"": self.statuses_count,
+            ""created_at"": self.created_at,
+        }
+        
+        # 添加额外人设信息
+        if self.age:
+            profile[""age""] = self.age
+        if self.gender:
+            profile[""gender""] = self.gender
+        if self.mbti:
+            profile[""mbti""] = self.mbti
+        if self.country:
+            profile[""country""] = self.country
+        if self.profession:
+            profile[""profession""] = self.profession
+        if self.interested_topics:
+            profile[""interested_topics""] = self.interested_topics
+        
+        return profile
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """"""转换为完整字典格式""""""
+        return {
+            ""user_id"": self.user_id,
+            ""user_name"": self.user_name,
+            ""name"": self.name,
+            ""bio"": self.bio,
+            ""persona"": self.persona,
+            ""karma"": self.karma,
+            ""friend_count"": self.friend_count,
+            ""follower_count"": self.follower_count,
+            ""statuses_count"": self.statuses_count,
+            ""age"": self.age,
+            ""gender"": self.gender,
+            ""mbti"": self.mbti,
+            ""country"": self.country,
+            ""profession"": self.profession,
+            ""interested_topics"": self.interested_topics,
+            ""source_entity_uuid"": self.source_entity_uuid,
+            ""source_entity_type"": self.source_entity_type,
+            ""created_at"": self.created_at,
+        }
+
+
+",""
+"Class:backend/app/services/oasis_profile_generator.py:OasisProfileGenerator:142","OasisProfileGenerator","backend/app/services/oasis_profile_generator.py",142,1199,true,"
+
+class OasisProfileGenerator:
+    """"""
+    OASIS Profile生成器
+    
+    将Zep图谱中的实体转换为OASIS模拟所需的Agent Profile
+    
+    优化特性：
+    1. 调用Zep图谱检索功能获取更丰富的上下文
+    2. 生成非常详细的人设（包括基本信息、职业经历、性格特征、社交媒体行为等）
+    3. 区分个人实体和抽象群体实体
+    """"""
+    
+    # MBTI类型列表
+    MBTI_TYPES = [
+        ""INTJ"", ""INTP"", ""ENTJ"", ""ENTP"",
+        ""INFJ"", ""INFP"", ""ENFJ"", ""ENFP"",
+        ""ISTJ"", ""ISFJ"", ""ESTJ"", ""ESFJ"",
+        ""ISTP"", ""ISFP"", ""ESTP"", ""ESFP""
+    ]
+    
+    # 常见国家列表
+    COUNTRIES = [
+        ""China"", ""US"", ""UK"", ""Japan"", ""Germany"", ""France"", 
+        ""Canada"", ""Australia"", ""Brazil"", ""India"", ""South Korea""
+    ]
+    
+    # 个人类型实体（需要生成具体人设）
+    INDIVIDUAL_ENTITY_TYPES = [
+        ""student"", ""alumni"", ""professor"", ""person"", ""publicfigure"", 
+        ""expert"", ""faculty"", ""official"", ""journalist"", ""activist""
+    ]
+    
+    # 群体/机构类型实体（需要生成群体代表人设）
+    GROUP_ENTITY_TYPES = [
+        ""university"", ""governmentagency"", ""organization"", ""ngo"", 
+        ""mediaoutlet"", ""company"", ""institution"", ""group"", ""community""
+    ]
+    
+    def __init__(
+        self, 
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
+        zep_api_key: Optional[str] = None,
+        graph_id: Optional[str] = None
+    ):
+        self.api_key = api_key or Config.LLM_API_KEY
+        self.base_url = base_url or Config.LLM_BASE_URL
+        self.model_name = model_name or Config.LLM_MODEL_NAME
+        
+        if not self.api_key:
+            raise ValueError(""LLM_API_KEY 未配置"")
+        
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+        
+        # Zep客户端用于检索丰富上下文
+        self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
+        self.zep_client = None
+        self.graph_id = graph_id
+        
+        if self.zep_api_key:
+            try:
+                self.zep_client = Zep(api_key=self.zep_api_key)
+            except Exception as e:
+                logger.warning(f""Zep客户端初始化失败: {e}"")
+    
+    def generate_profile_from_entity(
+        self, 
+        entity: EntityNode, 
+        user_id: int,
+        use_llm: bool = True
+    ) -> OasisAgentProfile:
+        """"""
+        从Zep实体生成OASIS Agent Profile
+        
+        Args:
+            entity: Zep实体节点
+            user_id: 用户ID（用于OASIS）
+            use_llm: 是否使用LLM生成详细人设
+            
+        Returns:
+            OasisAgentProfile
+        """"""
+        entity_type = entity.get_entity_type() or ""Entity""
+        
+        # 基础信息
+        name = entity.name
+        user_name = self._generate_username(name)
+        
+        # 构建上下文信息
+        context = self._build_entity_context(entity)
+        
+        if use_llm:
+            # 使用LLM生成详细人设
+            profile_data = self._generate_profile_with_llm(
+                entity_name=name,
+                entity_type=entity_type,
+                entity_summary=entity.summary,
+                entity_attributes=entity.attributes,
+                context=context
+            )
+        else:
+            # 使用规则生成基础人设
+            profile_data = self._generate_profile_rule_based(
+                entity_name=name,
+                entity_type=entity_type,
+                entity_summary=entity.summary,
+                entity_attributes=entity.attributes
+            )
+        
+        return OasisAgentProfile(
+            user_id=user_id,
+            user_name=user_name,
+            name=name,
+            bio=profile_data.get(""bio"", f""{entity_type}: {name}""),
+            persona=profile_data.get(""persona"", entity.summary or f""A {entity_type} named {name}.""),
+            karma=profile_data.get(""karma"", random.randint(500, 5000)),
+            friend_count=profile_data.get(""friend_count"", random.randint(50, 500)),
+            follower_count=profile_data.get(""follower_count"", random.randint(100, 1000)),
+            statuses_count=profile_data.get(""statuses_count"", random.randint(100, 2000)),
+            age=profile_data.get(""age""),
+            gender=profile_data.get(""gender""),
+            mbti=profile_data.get(""mbti""),
+            country=profile_data.get(""country""),
+            profession=profile_data.get(""profession""),
+            interested_topics=profile_data.get(""interested_topics"", []),
+            source_entity_uuid=entity.uuid,
+            source_entity_type=entity_type,
+        )
+    
+    def _generate_username(self, name: str) -> str:
+        """"""生成用户名""""""
+        # 移除特殊字符，转换为小写
+        username = name.lower().replace("" "", ""_"")
+        username = ''.join(c for c in username if c.isalnum() or c == '_')
+        
+        # 添加随机后缀避免重复
+        suffix = random.randint(100, 999)
+        return f""{username}_{suffix}""
+    
+    def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
+        """"""
+        使用Zep图谱混合搜索功能获取实体相关的丰富信息
+        
+        Zep没有内置混合搜索接口，需要分别搜索edges和nodes然后合并结果。
+        使用并行请求同时搜索，提高效率。
+        
+    
+... [truncated]",""
+"Class:backend/app/services/graph_builder.py:GraphInfo:22","GraphInfo","backend/app/services/graph_builder.py",22,35,true,"
+@dataclass
+class GraphInfo:
+    """"""图谱信息""""""
+    graph_id: str
+    node_count: int
+    edge_count: int
+    entity_types: List[str]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            ""graph_id"": self.graph_id,
+            ""node_count"": self.node_count,
+            ""edge_count"": self.edge_count,
+            ""entity_types"": self.entity_types,
+        }
+
+
+",""
+"Class:backend/app/services/graph_builder.py:GraphBuilderService:38","GraphBuilderService","backend/app/services/graph_builder.py",38,498,true,"
+
+class GraphBuilderService:
+    """"""
+    图谱构建服务
+    负责调用Zep API构建知识图谱
+    """"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or Config.ZEP_API_KEY
+        if not self.api_key:
+            raise ValueError(""ZEP_API_KEY 未配置"")
+        
+        self.client = Zep(api_key=self.api_key)
+        self.task_manager = TaskManager()
+    
+    def build_graph_async(
+        self,
+        text: str,
+        ontology: Dict[str, Any],
+        graph_name: str = ""MiroFish Graph"",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        batch_size: int = 3
+    ) -> str:
+        """"""
+        异步构建图谱
+        
+        Args:
+            text: 输入文本
+            ontology: 本体定义（来自接口1的输出）
+            graph_name: 图谱名称
+            chunk_size: 文本块大小
+            chunk_overlap: 块重叠大小
+            batch_size: 每批发送的块数量
+            
+        Returns:
+            任务ID
+        """"""
+        # 创建任务
+        task_id = self.task_manager.create_task(
+            task_type=""graph_build"",
+            metadata={
+                ""graph_name"": graph_name,
+                ""chunk_size"": chunk_size,
+                ""text_length"": len(text),
+            }
+        )
+        
+        # 在后台线程中执行构建
+        thread = threading.Thread(
+            target=self._build_graph_worker,
+            args=(task_id, text, ontology, graph_name, chunk_size, chunk_overlap, batch_size)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return task_id
+    
+    def _build_graph_worker(
+        self,
+        task_id: str,
+        text: str,
+        ontology: Dict[str, Any],
+        graph_name: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        batch_size: int
+    ):
+        """"""图谱构建工作线程""""""
+        try:
+            self.task_manager.update_task(
+                task_id,
+                status=TaskStatus.PROCESSING,
+                progress=5,
+                message=""开始构建图谱...""
+            )
+            
+            # 1. 创建图谱
+            graph_id = self.create_graph(graph_name)
+            self.task_manager.update_task(
+                task_id,
+                progress=10,
+                message=f""图谱已创建: {graph_id}""
+            )
+            
+            # 2. 设置本体
+            self.set_ontology(graph_id, ontology)
+            self.task_manager.update_task(
+                task_id,
+                progress=15,
+                message=""本体已设置""
+            )
+            
+            # 3. 文本分块
+            chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
+            total_chunks = len(chunks)
+            self.task_manager.update_task(
+                task_id,
+                progress=20,
+                message=f""文本已分割为 {total_chunks} 个块""
+            )
+            
+            # 4. 分批发送数据
+            episode_uuids = self.add_text_batches(
+                graph_id, chunks, batch_size,
+                lambda msg, prog: self.task_manager.update_task(
+                    task_id,
+                    progress=20 + int(prog * 0.4),  # 20-60%
+                    message=msg
+                )
+            )
+            
+            # 5. 等待Zep处理完成
+            self.task_manager.update_task(
+                task_id,
+                progress=60,
+                message=""等待Zep处理数据...""
+            )
+            
+            self._wait_for_episodes(
+                episode_uuids,
+                lambda msg, prog: self.task_manager.update_task(
+                    task_id,
+                    progress=60 + int(prog * 0.3),  # 60-90%
+                    message=msg
+                )
+            )
+            
+            # 6. 获取图谱信息
+            self.task_manager.update_task(
+                task_id,
+                progress=90,
+                message=""获取图谱信息...""
+            )
+            
+            graph_info = self._get_graph_info(graph_id)
+            
+            # 完成
+            self.task_manager.complete_task(task_id, {
+                ""graph_id"": graph_id,
+                ""graph_info"": graph_info.to_dict(),
+                ""chunks_processed"": total_chunks,
+            })
+            
+        except Exception as e:
+            import traceback
+            error_msg = f""{str(e)}\n{traceback.format_exc()}""
+            self.task_manager.fail_task(task_id, error_msg)
+    
+    def create_graph(self, name: str) -> str:
+        """"""创建Zep图谱（公开方法）""""""
+        graph_id = f""mirofish_{uuid.uuid4().hex[:16]}""
+        
+        self.client.graph.create(
+            graph_id=graph_id,
+            name=name,
+            description=""MiroFish Social Simulation Graph""
+        )
+        
+        return graph_id
+    
+    def set_ontology(self, graph_id: str, ontology: Dict[str, Any]):
+        """"""设置图谱本体（公开方法）""""""
+        import warnings
+        from typing import Optional
+        from pydantic import Field
+        from zep_cloud.external_clients.ont
+... [truncated]",""
+"Class:backend/app/models/task.py:TaskStatus:13","TaskStatus","backend/app/models/task.py",13,18,true,"
+
+class TaskStatus(str, Enum):
+    """"""任务状态枚举""""""
+    PENDING = ""pending""          # 等待中
+    PROCESSING = ""processing""    # 处理中
+    COMPLETED = ""completed""      # 已完成
+    FAILED = ""failed""            # 失败
+
+
+",""
+"Class:backend/app/models/task.py:Task:22","Task","backend/app/models/task.py",22,50,true,"
+@dataclass
+class Task:
+    """"""任务数据类""""""
+    task_id: str
+    task_type: str
+    status: TaskStatus
+    created_at: datetime
+    updated_at: datetime
+    progress: int = 0              # 总进度百分比 0-100
+    message: str = """"              # 状态消息
+    result: Optional[Dict] = None  # 任务结果
+    error: Optional[str] = None    # 错误信息
+    metadata: Dict = field(default_factory=dict)  # 额外元数据
+    progress_detail: Dict = field(default_factory=dict)  # 详细进度信息
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """"""转换为字典""""""
+        return {
+            ""task_id"": self.task_id,
+            ""task_type"": self.task_type,
+            ""status"": self.status.value,
+            ""created_at"": self.created_at.isoformat(),
+            ""updated_at"": self.updated_at.isoformat(),
+            ""progress"": self.progress,
+            ""message"": self.message,
+            ""progress_detail"": self.progress_detail,
+            ""result"": self.result,
+            ""error"": self.error,
+            ""metadata"": self.metadata,
+        }
+
+
+",""
+"Class:backend/app/models/task.py:TaskManager:53","TaskManager","backend/app/models/task.py",53,182,true,"
+
+class TaskManager:
+    """"""
+    任务管理器
+    线程安全的任务状态管理
+    """"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        """"""单例模式""""""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._tasks: Dict[str, Task] = {}
+                    cls._instance._task_lock = threading.Lock()
+        return cls._instance
+    
+    def create_task(self, task_type: str, metadata: Optional[Dict] = None) -> str:
+        """"""
+        创建新任务
+        
+        Args:
+            task_type: 任务类型
+            metadata: 额外元数据
+            
+        Returns:
+            任务ID
+        """"""
+        task_id = str(uuid.uuid4())
+        now = datetime.now()
+        
+        task = Task(
+            task_id=task_id,
+            task_type=task_type,
+            status=TaskStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+            metadata=metadata or {}
+        )
+        
+        with self._task_lock:
+            self._tasks[task_id] = task
+        
+        return task_id
+    
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """"""获取任务""""""
+        with self._task_lock:
+            return self._tasks.get(task_id)
+    
+    def update_task(
+        self,
+        task_id: str,
+        status: Optional[TaskStatus] = None,
+        progress: Optional[int] = None,
+        message: Optional[str] = None,
+        result: Optional[Dict] = None,
+        error: Optional[str] = None,
+        progress_detail: Optional[Dict] = None
+    ):
+        """"""
+        更新任务状态
+        
+        Args:
+            task_id: 任务ID
+            status: 新状态
+            progress: 进度
+            message: 消息
+            result: 结果
+            error: 错误信息
+            progress_detail: 详细进度信息
+        """"""
+        with self._task_lock:
+            task = self._tasks.get(task_id)
+            if task:
+                task.updated_at = datetime.now()
+                if status is not None:
+                    task.status = status
+                if progress is not None:
+                    task.progress = progress
+                if message is not None:
+                    task.message = message
+                if result is not None:
+                    task.result = result
+                if error is not None:
+                    task.error = error
+                if progress_detail is not None:
+                    task.progress_detail = progress_detail
+    
+    def complete_task(self, task_id: str, result: Dict):
+        """"""标记任务完成""""""
+        self.update_task(
+            task_id,
+            status=TaskStatus.COMPLETED,
+            progress=100,
+            message=""任务完成"",
+            result=result
+        )
+    
+    def fail_task(self, task_id: str, error: str):
+        """"""标记任务失败""""""
+        self.update_task(
+            task_id,
+            status=TaskStatus.FAILED,
+            message=""任务失败"",
+            error=error
+        )
+    
+    def list_tasks(self, task_type: Optional[str] = None) -> list:
+        """"""列出任务""""""
+        with self._task_lock:
+            tasks = list(self._tasks.values())
+            if task_type:
+                tasks = [t for t in tasks if t.task_type == task_type]
+            return [t.to_dict() for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)]
+    
+    def cleanup_old_tasks(self, max_age_hours: int = 24):
+        """"""清理旧任务""""""
+        from datetime import timedelta
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        
+        with self._task_lock:
+            old_ids = [
+                tid for tid, task in self._tasks.items()
+                if task.created_at < cutoff and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
+            ]
+            for tid in old_ids:
+                del self._tasks[tid]
+
+",""
+"Class:backend/app/models/project.py:ProjectStatus:16","ProjectStatus","backend/app/models/project.py",16,22,true,"
+
+class ProjectStatus(str, Enum):
+    """"""项目状态""""""
+    CREATED = ""created""              # 刚创建，文件已上传
+    ONTOLOGY_GENERATED = ""ontology_generated""  # 本体已生成
+    GRAPH_BUILDING = ""graph_building""    # 图谱构建中
+    GRAPH_COMPLETED = ""graph_completed""  # 图谱构建完成
+    FAILED = ""failed""                # 失败
+
+
+",""
+"Class:backend/app/models/project.py:Project:26","Project","backend/app/models/project.py",26,97,true,"
+@dataclass
+class Project:
+    """"""项目数据模型""""""
+    project_id: str
+    name: str
+    status: ProjectStatus
+    created_at: str
+    updated_at: str
+    
+    # 文件信息
+    files: List[Dict[str, str]] = field(default_factory=list)  # [{filename, path, size}]
+    total_text_length: int = 0
+    
+    # 本体信息（接口1生成后填充）
+    ontology: Optional[Dict[str, Any]] = None
+    analysis_summary: Optional[str] = None
+    
+    # 图谱信息（接口2完成后填充）
+    graph_id: Optional[str] = None
+    graph_build_task_id: Optional[str] = None
+    
+    # 配置
+    simulation_requirement: Optional[str] = None
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    
+    # 错误信息
+    error: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """"""转换为字典""""""
+        return {
+            ""project_id"": self.project_id,
+            ""name"": self.name,
+            ""status"": self.status.value if isinstance(self.status, ProjectStatus) else self.status,
+            ""created_at"": self.created_at,
+            ""updated_at"": self.updated_at,
+            ""files"": self.files,
+            ""total_text_length"": self.total_text_length,
+            ""ontology"": self.ontology,
+            ""analysis_summary"": self.analysis_summary,
+            ""graph_id"": self.graph_id,
+            ""graph_build_task_id"": self.graph_build_task_id,
+            ""simulation_requirement"": self.simulation_requirement,
+            ""chunk_size"": self.chunk_size,
+            ""chunk_overlap"": self.chunk_overlap,
+            ""error"": self.error
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Project':
+        """"""从字典创建""""""
+        status = data.get('status', 'created')
+        if isinstance(status, str):
+            status = ProjectStatus(status)
+        
+        return cls(
+            project_id=data['project_id'],
+            name=data.get('name', 'Unnamed Project'),
+            status=status,
+            created_at=data.get('created_at', ''),
+            updated_at=data.get('updated_at', ''),
+            files=data.get('files', []),
+            total_text_length=data.get('total_text_length', 0),
+            ontology=data.get('ontology'),
+            analysis_summary=data.get('analysis_summary'),
+            graph_id=data.get('graph_id'),
+            graph_build_task_id=data.get('graph_build_task_id'),
+            simulation_requirement=data.get('simulation_requirement'),
+            chunk_size=data.get('chunk_size', 500),
+            chunk_overlap=data.get('chunk_overlap', 50),
+            error=data.get('error')
+        )
+
+
+",""
+"Class:backend/app/models/project.py:ProjectManager:100","ProjectManager","backend/app/models/project.py",100,303,true,"
+
+class ProjectManager:
+    """"""项目管理器 - 负责项目的持久化存储和检索""""""
+    
+    # 项目存储根目录
+    PROJECTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'projects')
+    
+    @classmethod
+    def _ensure_projects_dir(cls):
+        """"""确保项目目录存在""""""
+        os.makedirs(cls.PROJECTS_DIR, exist_ok=True)
+    
+    @classmethod
+    def _get_project_dir(cls, project_id: str) -> str:
+        """"""获取项目目录路径""""""
+        return os.path.join(cls.PROJECTS_DIR, project_id)
+    
+    @classmethod
+    def _get_project_meta_path(cls, project_id: str) -> str:
+        """"""获取项目元数据文件路径""""""
+        return os.path.join(cls._get_project_dir(project_id), 'project.json')
+    
+    @classmethod
+    def _get_project_files_dir(cls, project_id: str) -> str:
+        """"""获取项目文件存储目录""""""
+        return os.path.join(cls._get_project_dir(project_id), 'files')
+    
+    @classmethod
+    def _get_project_text_path(cls, project_id: str) -> str:
+        """"""获取项目提取文本存储路径""""""
+        return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
+    
+    @classmethod
+    def create_project(cls, name: str = ""Unnamed Project"") -> Project:
+        """"""
+        创建新项目
+        
+        Args:
+            name: 项目名称
+            
+        Returns:
+            新创建的Project对象
+        """"""
+        cls._ensure_projects_dir()
+        
+        project_id = f""proj_{uuid.uuid4().hex[:12]}""
+        now = datetime.now().isoformat()
+        
+        project = Project(
+            project_id=project_id,
+            name=name,
+            status=ProjectStatus.CREATED,
+            created_at=now,
+            updated_at=now
+        )
+        
+        # 创建项目目录结构
+        project_dir = cls._get_project_dir(project_id)
+        files_dir = cls._get_project_files_dir(project_id)
+        os.makedirs(project_dir, exist_ok=True)
+        os.makedirs(files_dir, exist_ok=True)
+        
+        # 保存项目元数据
+        cls.save_project(project)
+        
+        return project
+    
+    @classmethod
+    def save_project(cls, project: Project) -> None:
+        """"""保存项目元数据""""""
+        project.updated_at = datetime.now().isoformat()
+        meta_path = cls._get_project_meta_path(project.project_id)
+        
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+    
+    @classmethod
+    def get_project(cls, project_id: str) -> Optional[Project]:
+        """"""
+        获取项目
+        
+        Args:
+            project_id: 项目ID
+            
+        Returns:
+            Project对象，如果不存在返回None
+        """"""
+        meta_path = cls._get_project_meta_path(project_id)
+        
+        if not os.path.exists(meta_path):
+            return None
+        
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        return Project.from_dict(data)
+    
+    @classmethod
+    def list_projects(cls, limit: int = 50) -> List[Project]:
+        """"""
+        列出所有项目
+        
+        Args:
+            limit: 返回数量限制
+            
+        Returns:
+            项目列表，按创建时间倒序
+        """"""
+        cls._ensure_projects_dir()
+        
+        projects = []
+        for project_id in os.listdir(cls.PROJECTS_DIR):
+            project = cls.get_project(project_id)
+            if project:
+                projects.append(project)
+        
+        # 按创建时间倒序排序
+        projects.sort(key=lambda p: p.created_at, reverse=True)
+        
+        return projects[:limit]
+    
+    @classmethod
+    def delete_project(cls, project_id: str) -> bool:
+        """"""
+        删除项目及其所有文件
+        
+        Args:
+            project_id: 项目ID
+            
+        Returns:
+            是否删除成功
+        """"""
+        project_dir = cls._get_project_dir(project_id)
+        
+        if not os.path.exists(project_dir):
+            return False
+        
+        shutil.rmtree(project_dir)
+        return True
+    
+    @classmethod
+    def save_file_to_project(cls, project_id: str, file_storage, original_filename: str) -> Dict[str, str]:
+        """"""
+        保存上传的文件到项目目录
+        
+        Args:
+            project_id: 项目ID
+            file_storage: Flask的FileStorage对象
+            original_filename: 原始文件名
+            
+        Returns:
+            文件信息字典 {filename, path, size}
+        """"""
+        files_dir = cls._get_project_files_dir(project_id)
+        os.makedirs(files_dir, exist_ok=True)
+        
+        # 生成安全的文件名
+        ext = os.path.splitext(original_filename)[1].lower()
+        safe_filename = f""{uuid.uuid4().hex[:8]}{ext}""
+        file_path = os.path.join(files_dir, safe_filename)
+        
+        # 保存文件
+        file_storage.save(file_path)
+        
+        # 获取文件大小
+        file_size = os.path.getsize(file_path)
+        
+        return {
+            ""original_filename"": original_filename,
+            ""saved_filename"": safe_filename,
+            ""path"": file_path,
+            ""size"": file_size
+        }
+    
+    @classmet
+... [truncated]",""
