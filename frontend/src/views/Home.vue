@@ -2,7 +2,7 @@
   <div class="home-container">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand">MIROFISH</div>
+      <div class="nav-brand">Đàn cá Mirofish</div>
       <div class="nav-links">
         <div class="lang-switcher">
           <button
@@ -18,7 +18,7 @@
           >VI</button>
         </div>
         <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
-          {{ $t('nav.github') }} <span class="arrow">↗</span>
+          {{ t('nav.github') }} <span class="arrow">↗</span>
         </a>
       </div>
     </nav>
@@ -28,21 +28,21 @@
       <section class="hero-section">
         <div class="hero-left">
           <div class=”tag-row”>
-            <span class=”orange-tag”>{{ $t('hero.tagline') }}</span>
-            <span class=”version-text”>{{ $t('hero.version') }}</span>
+            <span class=”orange-tag”>{{ t('hero.tagline') }}</span>
+            <span class=”version-text”>{{ t('hero.version') }}</span>
           </div>
 
           <h1 class=”main-title”>
-            {{ $t('hero.title1') }}<br>
-            <span class=”gradient-text”>{{ $t('hero.title2') }}</span>
+            {{ t('hero.title1') }}<br>
+            <span class=”gradient-text”>{{ t('hero.title2') }}</span>
           </h1>
 
           <div class=”hero-desc”>
             <p>
-              {{ $t('hero.desc1') }}<span class=”highlight-bold”>MiroFish</span>{{ $t('hero.desc2') }}<span class=”highlight-orange”>{{ $t('hero.desc3') }}</span>{{ $t('hero.desc4') }}<span class=”highlight-code”>{{ $t('hero.desc5') }}</span>
+              {{ t('hero.desc1') }}<span class=”highlight-bold”>MiroFish</span>{{ t('hero.desc2') }}<span class=”highlight-orange”>{{ t('hero.desc3') }}</span>{{ t('hero.desc4') }}<span class=”highlight-code”>{{ t('hero.desc5') }}</span>
             </p>
             <p class=”slogan-text”>
-              {{ $t('hero.slogan') }}<span class=”blinking-cursor”>_</span>
+              {{ t('hero.slogan') }}<span class=”blinking-cursor”>_</span>
             </p>
           </div>
            
@@ -66,65 +66,65 @@
         <!-- 左栏：状态与步骤 -->
         <div class="left-panel">
           <div class="panel-header">
-            <span class="status-dot">■</span> {{ $t('status.systemStatus') }}
+            <span class="status-dot">■</span> {{ t('status.systemStatus') }}
           </div>
 
-          <h2 class="section-title">{{ $t('status.ready') }}</h2>
+          <h2 class="section-title">{{ t('status.ready') }}</h2>
           <p class="section-desc">
-            {{ $t('status.readyDesc') }}
+            {{ t('status.readyDesc') }}
           </p>
 
           <!-- 数据指标卡片 -->
           <div class="metrics-row">
             <div class="metric-card">
-              <div class="metric-value">{{ $t('status.lowCost') }}</div>
-              <div class="metric-label">{{ $t('status.lowCostDesc') }}</div>
+              <div class="metric-value">{{ t('status.lowCost') }}</div>
+              <div class="metric-label">{{ t('status.lowCostDesc') }}</div>
             </div>
             <div class="metric-card">
-              <div class="metric-value">{{ $t('status.highAvail') }}</div>
-              <div class="metric-label">{{ $t('status.highAvailDesc') }}</div>
+              <div class="metric-value">{{ t('status.highAvail') }}</div>
+              <div class="metric-label">{{ t('status.highAvailDesc') }}</div>
             </div>
           </div>
 
           <!-- 项目模拟步骤介绍 (新增区域) -->
           <div class="steps-container">
             <div class="steps-header">
-               <span class="diamond-icon">◇</span> {{ $t('workflow.title') }}
+               <span class="diamond-icon">◇</span> {{ t('workflow.title') }}
             </div>
             <div class="workflow-list">
               <div class="workflow-item">
                 <span class="step-num">01</span>
                 <div class="step-info">
-                  <div class="step-title">{{ $t('workflow.step1Title') }}</div>
-                  <div class="step-desc">{{ $t('workflow.step1Desc') }}</div>
+                  <div class="step-title">{{ t('workflow.step1Title') }}</div>
+                  <div class="step-desc">{{ t('workflow.step1Desc') }}</div>
                 </div>
               </div>
               <div class="workflow-item">
                 <span class="step-num">02</span>
                 <div class="step-info">
-                  <div class="step-title">{{ $t('workflow.step2Title') }}</div>
-                  <div class="step-desc">{{ $t('workflow.step2Desc') }}</div>
+                  <div class="step-title">{{ t('workflow.step2Title') }}</div>
+                  <div class="step-desc">{{ t('workflow.step2Desc') }}</div>
                 </div>
               </div>
               <div class="workflow-item">
                 <span class="step-num">03</span>
                 <div class="step-info">
-                  <div class="step-title">{{ $t('workflow.step3Title') }}</div>
-                  <div class="step-desc">{{ $t('workflow.step3Desc') }}</div>
+                  <div class="step-title">{{ t('workflow.step3Title') }}</div>
+                  <div class="step-desc">{{ t('workflow.step3Desc') }}</div>
                 </div>
               </div>
               <div class="workflow-item">
                 <span class="step-num">04</span>
                 <div class="step-info">
-                  <div class="step-title">{{ $t('workflow.step4Title') }}</div>
-                  <div class="step-desc">{{ $t('workflow.step4Desc') }}</div>
+                  <div class="step-title">{{ t('workflow.step4Title') }}</div>
+                  <div class="step-desc">{{ t('workflow.step4Desc') }}</div>
                 </div>
               </div>
               <div class="workflow-item">
                 <span class="step-num">05</span>
                 <div class="step-info">
-                  <div class="step-title">{{ $t('workflow.step5Title') }}</div>
-                  <div class="step-desc">{{ $t('workflow.step5Desc') }}</div>
+                  <div class="step-title">{{ t('workflow.step5Title') }}</div>
+                  <div class="step-desc">{{ t('workflow.step5Desc') }}</div>
                 </div>
               </div>
             </div>
@@ -137,8 +137,8 @@
             <!-- 上传区域 -->
             <div class="console-section">
               <div class="console-header">
-                <span class="console-label">01 / {{ $t('console.realitySeed') }}</span>
-                <span class="console-meta">{{ $t('console.supportedFormats') }}</span>
+                <span class="console-label">01 / {{ t('console.realitySeed') }}</span>
+                <span class="console-meta">{{ t('console.supportedFormats') }}</span>
               </div>
               
               <div 
@@ -161,8 +161,8 @@
                 
                 <div v-if="files.length === 0" class="upload-placeholder">
                   <div class="upload-icon">↑</div>
-                  <div class="upload-title">{{ $t('console.dragUpload') }}</div>
-                  <div class="upload-hint">{{ $t('console.clickBrowse') }}</div>
+                  <div class="upload-title">{{ t('console.dragUpload') }}</div>
+                  <div class="upload-hint">{{ t('console.clickBrowse') }}</div>
                 </div>
                 
                 <div v-else class="file-list">
@@ -177,23 +177,23 @@
 
             <!-- 分割线 -->
             <div class="console-divider">
-              <span>{{ $t('console.inputParams') }}</span>
+              <span>{{ t('console.inputParams') }}</span>
             </div>
 
             <!-- 输入区域 -->
             <div class="console-section">
               <div class="console-header">
-                <span class="console-label">>_ 02 / {{ $t('console.simPrompt') }}</span>
+                <span class="console-label">>_ 02 / {{ t('console.simPrompt') }}</span>
               </div>
               <div class="input-wrapper">
                 <textarea
                   v-model="formData.simulationRequirement"
                   class="code-input"
-                  :placeholder="$t('console.promptPlaceholder')"
+                  :placeholder="t('console.promptPlaceholder')"
                   rows="6"
                   :disabled="loading"
                 ></textarea>
-                <div class="model-badge">{{ $t('console.engineBadge') }}</div>
+                <div class="model-badge">{{ t('console.engineBadge') }}</div>
               </div>
             </div>
 
@@ -204,8 +204,8 @@
                 @click="startSimulation"
                 :disabled="!canSubmit || loading"
               >
-                <span v-if="!loading">{{ $t('console.startEngine') }}</span>
-                <span v-else>{{ $t('console.initializing') }}</span>
+                <span v-if="!loading">{{ t('console.startEngine') }}</span>
+                <span v-else>{{ t('console.initializing') }}</span>
                 <span class="btn-arrow">→</span>
               </button>
             </div>
@@ -222,15 +222,18 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { setLocale, getLocale } from '../i18n'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 
 const router = useRouter()
+const { t, locale } = useI18n({ useScope: 'global' })
 
 // 语言切换
 const currentLocale = ref(getLocale())
 const switchLang = (lang) => {
   setLocale(lang)
+  locale.value = lang
   currentLocale.value = lang
 }
 

@@ -3,12 +3,13 @@ import service from '../api/index'
 import zh from './zh.json'
 import vi from './vi.json'
 
-const savedLocale = localStorage.getItem('mirofish-locale') || 'zh'
+const savedLocale = localStorage.getItem('mirofish-locale') || 'vi'
 
 const i18n = createI18n({
   legacy: false,
+  globalInjection: true,
   locale: savedLocale,
-  fallbackLocale: 'zh',
+  fallbackLocale: 'vi',
   messages: { zh, vi }
 })
 
